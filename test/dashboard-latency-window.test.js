@@ -34,7 +34,7 @@ function latencyRow(partitionId, timestamp, value) {
   return `(${buildHistoryId(partitionId, timestamp)}, ${timestamp}, ${value}, ${value + 1}, ${value + 2}, ${value + 3}, ${value % 10}, ${(value + 1) % 10}, ${(value + 2) % 10}, ${(value + 3) % 10})`;
 }
 
-test('dashboard latency history samples one hour from D1 into at most 30 real points', async () => {
+test('dashboard latency history samples two hours from D1 into at most 20 real points', async () => {
   const miniflare = createMiniflare();
 
   try {
@@ -44,7 +44,7 @@ test('dashboard latency history samples one hour from D1 into at most 30 real po
     const partitionId = 1;
     const start = Date.UTC(2026, 6, 29, 0, 0, 0);
     const rows = [];
-    for (let index = 0; index < 60; index++) {
+    for (let index = 0; index < 120; index++) {
       rows.push(latencyRow(partitionId, start + index * 60_000, 20 + index));
     }
 
@@ -62,14 +62,14 @@ test('dashboard latency history samples one hour from D1 into at most 30 real po
       history_partition_id: partitionId,
       timestamp: start
     }], {
-      now: start + 60 * 60_000,
+      now: start + 120 * 60_000,
       cache: false
     });
 
     const window = history.get('server-1');
-    assert.equal(window.ping.length, 30);
-    assert.equal(window.loss.length, 30);
-    assert.equal(new Set(window.ping.map(point => point.ts)).size, 30);
+    assert.equal(window.ping.length, 20);
+    assert.equal(window.loss.length, 20);
+    assert.equal(new Set(window.ping.map(point => point.ts)).size, 20);
     assert.equal(window.ping.every(point => point.ct >= 20), true);
     assert.equal(window.loss.every(point => point.ct >= 0 && point.ct <= 100), true);
   } finally {
@@ -77,7 +77,7 @@ test('dashboard latency history samples one hour from D1 into at most 30 real po
   }
 });
 
-test('dashboard latency history cache is reused for two minutes per server', async () => {
+test('dashboard latency history cache is reused for five minutes per server', async () => {
   const miniflare = createMiniflare();
 
   try {
@@ -115,12 +115,12 @@ test('dashboard latency history cache is reused for two minutes per server', asy
     `).run();
 
     const cached = await getDashboardLatencyHistory(db, [server], {
-      now: start + 90_000
+      now: start + 4 * 60_000
     });
     assert.equal(cached.get('server-cache').ping.at(-1).ct, 30);
 
     const refreshed = await getDashboardLatencyHistory(db, [server], {
-      now: start + 190_000
+      now: start + 6 * 60_000
     });
     assert.equal(refreshed.get('server-cache').ping.at(-1).ct, 90);
   } finally {

@@ -13,8 +13,6 @@
               :key="index"
               class="three-net-bucket"
               :data-tooltip="point.pingTooltip"
-              @pointerenter="updateThreeNetTooltipPosition"
-              @pointerdown="updateThreeNetTooltipPosition"
             >
               <span class="three-net-bucket-fill" :style="{ height: point.pingHeight + '%', background: point.pingColor, opacity: point.pingOpacity }"></span>
             </span>
@@ -32,8 +30,6 @@
               :key="index"
               class="three-net-bucket"
               :data-tooltip="point.lossTooltip"
-              @pointerenter="updateThreeNetTooltipPosition"
-              @pointerdown="updateThreeNetTooltipPosition"
             >
               <span class="three-net-bucket-fill" :style="{ height: point.lossHeight + '%', background: point.lossColor, opacity: point.lossOpacity }"></span>
             </span>
@@ -59,8 +55,6 @@
 </template>
 
 <script setup>
-import { updateThreeNetTooltipPosition } from '../utils/threeNetTooltip'
-
 defineProps({
   variant: {
     type: String,
