@@ -36,6 +36,16 @@ jobs:
       - name: Install Miniflare test runtime
         run: npm install --include=dev --no-save --package-lock=false miniflare@3.20250718.3
 
+      - name: Test runtime suite
+        run: npm run test
+
+      - name: Guard Durable Object WebSocket hibernation
+        run: |
+          if grep -nE 'server\.accept\(' src/durable/MetricsBroadcaster.js; then
+            echo "::error::Durable Object must use state.acceptWebSocket() so Agent connections can hibernate."
+            exit 1
+          fi
+
       - name: Test agent configuration
         run: npm run test:agent-config
 

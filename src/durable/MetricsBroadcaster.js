@@ -8,9 +8,9 @@
 // - 后端 /update WSS 由本 DO 接收 Agent 指标，并向所有订阅者广播。
 // - 兼容旧 POST 上报，/update 处理器在成功写入 DB 后会调用 /__do_push/<id>。
 //
-// - 前端订阅连接使用 DO WebSocket Hibernation API，闲置时休眠以节省资源。
-//   通过 setWebSocketAutoResponse 自动响应 ping，无需唤醒 DO。
-// - Agent 上报连接使用标准 WebSocket API，避免高频指标消息计为 hibernation wakeup。
+// - 前端订阅与 Agent 上报连接都使用 DO WebSocket Hibernation API。
+//   闲置时连接保持不断开，但 DO 可以休眠以避免持续产生 duration。
+// - 通过 setWebSocketAutoResponse 自动响应 ping，无需唤醒 DO。
 
 import { saveMetricsHistory } from '../database/schema.js';
 import { ensureServerOptimization } from '../database/indexOptimization.js';
@@ -279,8 +279,6 @@ export class MetricsBroadcaster {
     this.resourceAlertCacheActiveUntil = 0;
     this.agentServerDetails = new Map();
     this.agentHistoryWrites = new Map();
-    this.standardAgentWebSocketCount = 0;
-    this.standardAgentWebSockets = new Set();
     this.lastAgentRealtimeHintAt = 0;
 
     // 自动响应 ping 心跳，DO 无需被唤醒
@@ -430,14 +428,14 @@ export class MetricsBroadcaster {
   }
 
   _getAgentReportWebSockets() {
-    const sockets = new Set(this.standardAgentWebSockets);
+    const sockets = [];
     for (const ws of this.state.getWebSockets()) {
       const attachment = ws.deserializeAttachment();
       if (attachment?.kind === AGENT_REPORT_KIND) {
-        sockets.add(ws);
+        sockets.push(ws);
       }
     }
-    return Array.from(sockets);
+    return sockets;
   }
 
   _isWebSocketUpgrade(request) {
@@ -451,44 +449,12 @@ export class MetricsBroadcaster {
     } catch (_) {}
   }
 
-  _acceptStandardAgentWebSocket(server, initialAttachment) {
-    // Agent 上报连接使用标准 WebSocket API，避免每条业务消息都成为 hibernation wakeup。
-    // 代价是只要 Agent 长连接存在，本 DO 就不能休眠，会持续产生 duration。
-    server.accept();
-
-    const session = { attachment: initialAttachment || {} };
-    const ws = {
-      send: data => server.send(data),
-      close: (code, reason) => server.close(code, reason),
-      serializeAttachment(value) {
-        session.attachment = value || {};
-      },
-      deserializeAttachment() {
-        return session.attachment;
-      }
-    };
-
-    this.standardAgentWebSocketCount += 1;
-    this.standardAgentWebSockets.add(ws);
-    let cleaned = false;
-    const cleanup = () => {
-      if (cleaned) return;
-      cleaned = true;
-      this.standardAgentWebSocketCount = Math.max(0, this.standardAgentWebSocketCount - 1);
-      this.standardAgentWebSockets.delete(ws);
-    };
-
-    server.addEventListener('message', event => {
-      this._handleAgentReportMessage(ws, event.data, ws.deserializeAttachment())
-        .catch(error => {
-          console.warn('[update-ws] Agent standard WebSocket message failed:', error?.message || error);
-          this._closeWsWithError(ws, 'Internal error', 500);
-        });
-    });
-    server.addEventListener('close', cleanup);
-    server.addEventListener('error', cleanup);
-
-    return ws;
+  _acceptHibernatingAgentWebSocket(server, initialAttachment) {
+    // 必须由 Durable Object Hibernation API 接管 Agent 长连接。
+    // 使用标准 WebSocket accept 会让只要任意 Agent 在线，整个 DO 都无法休眠并持续计费。
+    this.state.acceptWebSocket(server);
+    server.serializeAttachment(initialAttachment || {});
+    return server;
   }
 
   _closeWsWithError(ws, message, code = 400, extra = {}, closeCode = WS_POLICY_VIOLATION, closeReason = message) {
@@ -1328,7 +1294,7 @@ export class MetricsBroadcaster {
     nextHour.setUTCMinutes(60, 0, 0);
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    const agentSocket = this._acceptStandardAgentWebSocket(server, {
+    const agentSocket = this._acceptHibernatingAgentWebSocket(server, {
       kind: AGENT_REPORT_KIND,
       authenticated: false,
       serverId: '',
@@ -1606,9 +1572,18 @@ export class MetricsBroadcaster {
     // ── 3) 健康检查 ────────────────────────────────────
     if (method === 'GET' && (path === '/health' || path.endsWith('/health'))) {
       const subscribers = this._getFrontendSubscriberCount();
-      const agentSockets = this.standardAgentWebSocketCount;
-      const sockets = this.state.getWebSockets().length + agentSockets;
-      return new Response(JSON.stringify({ ok: true, subscribers, sockets, agentSockets }), {
+      const sockets = this.state.getWebSockets();
+      const agentSockets = sockets.filter(ws => {
+        const attachment = ws.deserializeAttachment();
+        return attachment?.kind === AGENT_REPORT_KIND;
+      }).length;
+      return new Response(JSON.stringify({
+        ok: true,
+        subscribers,
+        sockets: sockets.length,
+        agentSockets,
+        agentWebSocketMode: 'hibernation'
+      }), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
@@ -2014,8 +1989,12 @@ export class MetricsBroadcaster {
     } catch (_) {}
   }
 
-  // WebSocket 关闭 — DO 自动清理，无需手动移除
-  webSocketClose(ws, code, reason) {}
+  // compatibility_date 仍早于 2026-04-07，需要显式完成 Close handshake。
+  webSocketClose(ws, code, reason) {
+    try {
+      ws.close(code, reason);
+    } catch (_) {}
+  }
 
   // WebSocket 错误 — DO 自动处理
   webSocketError(ws, error) {}
