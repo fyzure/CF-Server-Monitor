@@ -4,6 +4,10 @@ import { Miniflare } from 'miniflare';
 
 import { getDashboardLatencyHistory } from '../src/database/schema.js';
 import { buildHistoryId } from '../src/database/indexOptimization.js';
+import {
+  DASHBOARD_LATENCY_WINDOW_HOURS,
+  DASHBOARD_LATENCY_WINDOW_POINTS
+} from '../src/utils/config.js';
 
 function createMiniflare() {
   return new Miniflare({
@@ -75,6 +79,11 @@ test('dashboard latency history samples two hours from D1 into at most 20 real p
   } finally {
     await miniflare.dispose();
   }
+});
+
+test('dashboard latency window config exposes the public contract', () => {
+  assert.equal(DASHBOARD_LATENCY_WINDOW_POINTS, 20);
+  assert.equal(DASHBOARD_LATENCY_WINDOW_HOURS, 2);
 });
 
 test('dashboard latency history cache is reused for five minutes per server', async () => {
