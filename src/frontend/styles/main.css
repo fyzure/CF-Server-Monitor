@@ -2010,6 +2010,7 @@ body::before {
     position: relative;
     display: inline-flex;
     align-items: center;
+    gap: 8px;
     flex-shrink: 0;
 }
 
@@ -2040,6 +2041,10 @@ body::before {
 
 .toolbar-select::placeholder {
     color: var(--text-muted);
+}
+
+.toolbar-custom-input {
+    cursor: text;
 }
 
 .toolbar-select-clear {
