@@ -28,6 +28,11 @@ function isDurableObjectsHibernationInvocationType(value) {
   return type.includes('hibernation') || (type.includes('websocket') && type.includes('message'));
 }
 
+function isDurableObjectsAlarmInvocationType(value) {
+  const type = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return type === 'alarm' || type.endsWith('alarm');
+}
+
 function normalizeBooleanFlag(value) {
   return value === true || value === 1 || value === '1' || value === 'true' ? '1' : '0';
 }
@@ -298,17 +303,29 @@ export function estimateDurableObjectsBillableRequests(breakdown = {}) {
   }
 
   const httpRequests = toUsageNumber(breakdown.httpRequests);
-  const hibernationWakeups = toUsageNumber(breakdown.hibernationWakeups);
+  const alarmRequests = toUsageNumber(breakdown.alarmRequests);
+  const otherRequests = toUsageNumber(breakdown.otherRequests);
+  const hibernationWebSocketMessages = toUsageNumber(
+    breakdown.hibernationWebSocketMessages ?? breakdown.hibernationWakeups
+  );
   const inboundWebSocketMessages = toUsageNumber(breakdown.inboundWebSocketMessages);
+  const oneToOneRequests = httpRequests + alarmRequests + otherRequests;
+  const incomingWebSocketMessages = hibernationWebSocketMessages + inboundWebSocketMessages;
 
-  return Math.ceil(httpRequests) +
-    Math.ceil(hibernationWakeups) +
-    estimateDurableObjectsWebSocketBillableRequests(inboundWebSocketMessages);
+  // Cloudflare analytics reports actual WebSocket message counts. Billing applies
+  // the 20:1 ratio to incoming WebSocket messages, including Hibernation API
+  // messages that appear in durableObjectsInvocationsAdaptiveGroups.
+  return Math.ceil(oneToOneRequests) +
+    estimateDurableObjectsWebSocketBillableRequests(incomingWebSocketMessages);
 }
 
 export function summarizeDurableObjectsUsage(invocationGroups = [], periodicGroups = []) {
   const summary = {
     httpRequests: 0,
+    alarmRequests: 0,
+    otherRequests: 0,
+    hibernationWebSocketMessages: 0,
+    // Backward-compatible alias for older frontend/API consumers.
     hibernationWakeups: 0,
     inboundWebSocketMessages: 0,
     outboundWebSocketMessages: 0,
@@ -320,9 +337,14 @@ export function summarizeDurableObjectsUsage(invocationGroups = [], periodicGrou
     const requests = toUsageNumber(group?.sum?.requests);
     summary.rawRequests += requests;
     if (isDurableObjectsHibernationInvocationType(group?.dimensions?.type)) {
+      summary.hibernationWebSocketMessages += requests;
       summary.hibernationWakeups += requests;
-    } else {
+    } else if (isDurableObjectsAlarmInvocationType(group?.dimensions?.type)) {
+      summary.alarmRequests += requests;
+    } else if (/^(http|fetch)$/i.test(String(group?.dimensions?.type || ''))) {
       summary.httpRequests += requests;
+    } else {
+      summary.otherRequests += requests;
     }
   }
 
@@ -398,6 +420,9 @@ async function fetchCloudflareUsage(token, accountId, range) {
     workersRequests,
     durableObjectsRequests: durableObjectsUsage.billableRequests,
     durableObjectsHttpRequests: durableObjectsUsage.httpRequests,
+    durableObjectsAlarmRequests: durableObjectsUsage.alarmRequests,
+    durableObjectsOtherRequests: durableObjectsUsage.otherRequests,
+    durableObjectsHibernationWebSocketMessages: durableObjectsUsage.hibernationWebSocketMessages,
     durableObjectsHibernationWakeups: durableObjectsUsage.hibernationWakeups,
     durableObjectsInboundWebSocketMessages: durableObjectsUsage.inboundWebSocketMessages,
     durableObjectsOutboundWebSocketMessages: durableObjectsUsage.outboundWebSocketMessages,
@@ -427,6 +452,9 @@ async function getD1DailyUsage(token, accountId) {
     workersRequests: yesterdayUsage.workersRequests,
     durableObjectsRequests: yesterdayUsage.durableObjectsRequests,
     durableObjectsHttpRequests: yesterdayUsage.durableObjectsHttpRequests,
+    durableObjectsAlarmRequests: yesterdayUsage.durableObjectsAlarmRequests,
+    durableObjectsOtherRequests: yesterdayUsage.durableObjectsOtherRequests,
+    durableObjectsHibernationWebSocketMessages: yesterdayUsage.durableObjectsHibernationWebSocketMessages,
     durableObjectsHibernationWakeups: yesterdayUsage.durableObjectsHibernationWakeups,
     durableObjectsInboundWebSocketMessages: yesterdayUsage.durableObjectsInboundWebSocketMessages,
     durableObjectsOutboundWebSocketMessages: yesterdayUsage.durableObjectsOutboundWebSocketMessages,
@@ -443,6 +471,9 @@ async function getD1DailyUsage(token, accountId) {
       workersRequests: todayUsage.workersRequests,
       durableObjectsRequests: todayUsage.durableObjectsRequests,
       durableObjectsHttpRequests: todayUsage.durableObjectsHttpRequests,
+      durableObjectsAlarmRequests: todayUsage.durableObjectsAlarmRequests,
+      durableObjectsOtherRequests: todayUsage.durableObjectsOtherRequests,
+      durableObjectsHibernationWebSocketMessages: todayUsage.durableObjectsHibernationWebSocketMessages,
       durableObjectsHibernationWakeups: todayUsage.durableObjectsHibernationWakeups,
       durableObjectsInboundWebSocketMessages: todayUsage.durableObjectsInboundWebSocketMessages,
       durableObjectsOutboundWebSocketMessages: todayUsage.durableObjectsOutboundWebSocketMessages,

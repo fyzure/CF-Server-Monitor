@@ -832,9 +832,19 @@ const getDurableObjectsUsageRows = (usage = {}) => ([
     value: `${formatNumber(usage.durableObjectsHttpRequests)} · ${trans.value.billingRatioOneToOne}`
   },
   {
+    key: 'alarm',
+    label: trans.value.durableObjectsAlarmRequests,
+    value: `${formatNumber(usage.durableObjectsAlarmRequests)} · ${trans.value.billingRatioOneToOne}`
+  },
+  {
+    key: 'other',
+    label: trans.value.durableObjectsOtherRequests,
+    value: `${formatNumber(usage.durableObjectsOtherRequests)} · ${trans.value.billingRatioOneToOne}`
+  },
+  {
     key: 'hibernation',
-    label: trans.value.durableObjectsHibernationWakeups,
-    value: `${formatNumber(usage.durableObjectsHibernationWakeups)} · ${trans.value.billingRatioOneToOne}`
+    label: trans.value.durableObjectsHibernationWebSocketMessages,
+    value: `${formatNumber(usage.durableObjectsHibernationWebSocketMessages ?? usage.durableObjectsHibernationWakeups)} · ${trans.value.billingRatioWebSocketIncoming}`
   },
   {
     key: 'inbound-ws',
