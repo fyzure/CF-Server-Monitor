@@ -59,15 +59,19 @@ assert.equal(estimateDurableObjectsBillableRequests('101'), 6);
 
 assert.equal(estimateDurableObjectsBillableRequests({
   httpRequests: 12,
+  alarmRequests: 3,
+  otherRequests: 2,
   hibernationWakeups: 20,
   inboundWebSocketMessages: 21,
   outboundWebSocketMessages: 1000
-}), 34);
+}), 20);
 
 const usage = summarizeDurableObjectsUsage([
   { dimensions: { type: 'fetch' }, sum: { requests: 10 } },
   { dimensions: { type: 'websocket_message' }, sum: { requests: 21 } },
-  { dimensions: { type: 'webSocketHibernation' }, sum: { requests: 20 } }
+  { dimensions: { type: 'webSocketHibernation' }, sum: { requests: 20 } },
+  { dimensions: { type: 'alarm' }, sum: { requests: 3 } },
+  { dimensions: { type: 'rpc' }, sum: { requests: 4 } }
 ], [
   { sum: { inboundWebsocketMsgCount: 39, outboundWebsocketMsgCount: 100 } },
   { sum: { inboundWebsocketMsgCount: '1', outboundWebsocketMsgCount: '20' } }
@@ -75,12 +79,28 @@ const usage = summarizeDurableObjectsUsage([
 
 assert.deepEqual(usage, {
   httpRequests: 10,
+  alarmRequests: 3,
+  otherRequests: 4,
+  hibernationWebSocketMessages: 41,
   hibernationWakeups: 41,
   inboundWebSocketMessages: 40,
   outboundWebSocketMessages: 120,
-  rawRequests: 51,
-  billableRequests: 53
+  rawRequests: 58,
+  billableRequests: 22
 });
+
+const productionShapeUsage = summarizeDurableObjectsUsage([
+  { dimensions: { type: 'hibernation' }, sum: { requests: 100829 } },
+  { dimensions: { type: 'http' }, sum: { requests: 714 } },
+  { dimensions: { type: 'alarm' }, sum: { requests: 17 } }
+], [
+  { sum: { inboundWebsocketMsgCount: 0, outboundWebsocketMsgCount: 197579 } }
+]);
+
+assert.equal(productionShapeUsage.billableRequests, 5773);
+assert.equal(productionShapeUsage.hibernationWebSocketMessages, 100829);
+assert.equal(productionShapeUsage.httpRequests, 714);
+assert.equal(productionShapeUsage.alarmRequests, 17);
 
 assert.equal(isValidThemeOptions({}), true);
 assert.equal(isValidThemeOptions({ layout: 'compact' }), true);
