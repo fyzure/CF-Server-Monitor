@@ -8,8 +8,8 @@ export const JWT_SECRET_MIN_LENGTH = 32;
 
 // 首页三网延迟/丢包小窗口：影响 /api/servers 的 servers[].ping/loss 抽样，并通过 /api/config 暴露给主题。
 export const DASHBOARD_LATENCY_WINDOW_POINTS = 20;
-export const DASHBOARD_LATENCY_WINDOW_HOURS = 2;
-export const DASHBOARD_LATENCY_WINDOW_CACHE_TTL_MS = 5 * 60 * 1000;
+export const DASHBOARD_LATENCY_WINDOW_HOURS = 1;
+export const DASHBOARD_LATENCY_WINDOW_CACHE_TTL_MS = 2 * 60 * 1000;
 export const DASHBOARD_LATENCY_WINDOW_CACHE_MAX_SERVERS = 1000;
 export const DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY = 20;
 

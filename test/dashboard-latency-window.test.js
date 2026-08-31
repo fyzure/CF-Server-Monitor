@@ -4,6 +4,7 @@ import { Miniflare } from 'miniflare';
 
 import { getDashboardLatencyHistory } from '../src/database/schema.js';
 import { buildHistoryId } from '../src/database/indexOptimization.js';
+import { appendLatestLatencySample } from '../src/handlers/dashboard.js';
 import {
   DASHBOARD_LATENCY_WINDOW_HOURS,
   DASHBOARD_LATENCY_WINDOW_POINTS
@@ -38,7 +39,7 @@ function latencyRow(partitionId, timestamp, value) {
   return `(${buildHistoryId(partitionId, timestamp)}, ${timestamp}, ${value}, ${value + 1}, ${value + 2}, ${value + 3}, ${value % 10}, ${(value + 1) % 10}, ${(value + 2) % 10}, ${(value + 3) % 10})`;
 }
 
-test('dashboard latency history samples two hours from D1 into at most 20 real points', async () => {
+test('dashboard latency history samples one hour from D1 into at most 20 real points', async () => {
   const miniflare = createMiniflare();
 
   try {
@@ -83,7 +84,54 @@ test('dashboard latency history samples two hours from D1 into at most 20 real p
 
 test('dashboard latency window config exposes the public contract', () => {
   assert.equal(DASHBOARD_LATENCY_WINDOW_POINTS, 20);
-  assert.equal(DASHBOARD_LATENCY_WINDOW_HOURS, 2);
+  assert.equal(DASHBOARD_LATENCY_WINDOW_HOURS, 1);
+});
+
+test('dashboard latency window appends the latest sample while keeping at most 20 points', () => {
+  const base = Date.UTC(2026, 7, 31, 12, 0, 0);
+  const server = {
+    ping: Array.from({ length: 20 }, (_, index) => ({
+      ts: base + index * 180_000,
+      ct: 100 + index,
+      cu: 110 + index,
+      cm: 120 + index
+    })),
+    loss: Array.from({ length: 20 }, (_, index) => ({
+      ts: base + index * 180_000,
+      ct: 0,
+      cu: 0,
+      cm: 0
+    })),
+    ping_ct: 155,
+    ping_cu: 166,
+    ping_cm: 177,
+    ping_bd: false,
+    loss_ct: 0,
+    loss_cu: 1,
+    loss_cm: 2,
+    loss_bd: false
+  };
+
+  const latestTs = base + 60 * 60_000;
+  appendLatestLatencySample(server, latestTs);
+
+  assert.equal(server.ping.length, 20);
+  assert.equal(server.loss.length, 20);
+  assert.equal(server.ping[0].ts, base + 180_000);
+  assert.deepEqual(server.ping.at(-1), {
+    ts: latestTs,
+    ct: 155,
+    cu: 166,
+    cm: 177,
+    bd: false
+  });
+  assert.deepEqual(server.loss.at(-1), {
+    ts: latestTs,
+    ct: 0,
+    cu: 1,
+    cm: 2,
+    bd: false
+  });
 });
 
 test('dashboard latency history preserves empty buckets inside the window', async () => {
@@ -136,7 +184,7 @@ test('dashboard latency history preserves empty buckets inside the window', asyn
   }
 });
 
-test('dashboard latency history cache is reused for five minutes per server', async () => {
+test('dashboard latency history cache is reused for two minutes per server', async () => {
   const miniflare = createMiniflare();
 
   try {
@@ -174,12 +222,12 @@ test('dashboard latency history cache is reused for five minutes per server', as
     `).run();
 
     const cached = await getDashboardLatencyHistory(db, [server], {
-      now: start + 4 * 60_000
+      now: start + 90_000
     });
     assert.equal(cached.get('server-cache').ping.at(-1).ct, 30);
 
     const refreshed = await getDashboardLatencyHistory(db, [server], {
-      now: start + 6 * 60_000
+      now: start + 3 * 60_000
     });
     assert.equal(refreshed.get('server-cache').ping.at(-1).ct, 90);
   } finally {

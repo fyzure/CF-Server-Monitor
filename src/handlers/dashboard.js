@@ -80,6 +80,62 @@ function attachLatencyHistoryToServers(servers, latencyHistory) {
   }
 }
 
+const LATENCY_NODE_FIELDS = [
+  ['ct', 'ping_ct', 'loss_ct'],
+  ['cu', 'ping_cu', 'loss_cu'],
+  ['cm', 'ping_cm', 'loss_cm'],
+  ['bd', 'ping_bd', 'loss_bd']
+];
+
+function normalizeLatencyWindowValue(value, metricType) {
+  if (value === false || String(value ?? '').trim().toLowerCase() === 'false') return false;
+  if (value === null || value === undefined || value === '') return null;
+
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  if (metricType === 'loss') return Math.max(0, Math.min(100, number));
+  return number > 0 ? number : null;
+}
+
+function buildLatestLatencyPoint(server, timestamp, metricType) {
+  const ts = Number(timestamp);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+
+  const point = { ts };
+  let hasValue = false;
+  for (const [key, pingField, lossField] of LATENCY_NODE_FIELDS) {
+    const field = metricType === 'loss' ? lossField : pingField;
+    const value = normalizeLatencyWindowValue(server?.[field], metricType);
+    if (value === null) continue;
+    point[key] = value;
+    hasValue = true;
+  }
+  return hasValue ? point : null;
+}
+
+function appendLatencyPoint(points, point) {
+  if (!point) return Array.isArray(points) ? points : [];
+  const source = Array.isArray(points) ? points : [];
+  const merged = source
+    .filter(item => Number(item?.ts) !== point.ts)
+    .concat(point)
+    .sort((a, b) => Number(a?.ts || 0) - Number(b?.ts || 0));
+  return merged.slice(-DASHBOARD_LATENCY_WINDOW_POINTS);
+}
+
+export function appendLatestLatencySample(server, timestamp) {
+  if (!server || typeof server !== 'object') return server;
+  server.ping = appendLatencyPoint(
+    server.ping,
+    buildLatestLatencyPoint(server, timestamp, 'ping')
+  );
+  server.loss = appendLatencyPoint(
+    server.loss,
+    buildLatestLatencyPoint(server, timestamp, 'loss')
+  );
+  return server;
+}
+
 async function getDurableRealtimeState(env, serverIds) {
   const empty = { latestReportUpdates: [] };
   if (!env.METRICS_BROADCASTER || !Array.isArray(serverIds) || serverIds.length === 0) return empty;
@@ -226,6 +282,9 @@ export async function handleServersAPI(request, env, sys) {
     if (latestMetrics) {
       isOnline = (now - latestMetrics.timestamp) < 300000;
       mergeMetricsIntoServer(server, latestMetrics);
+      if (shouldIncludeLatencyHistory) {
+        appendLatestLatencySample(server, latestMetrics.timestamp);
+      }
     }
     normalizePublicIpFields(server);
     
