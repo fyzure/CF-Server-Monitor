@@ -192,6 +192,22 @@ function mergeLatestReportUpdates(serverIds, durableUpdates, workerUpdates) {
     .filter(Boolean);
 }
 
+export function getLatestRealtimeReportTimestamps(latestReportUpdates) {
+  const timestamps = new Map();
+
+  for (const update of Array.isArray(latestReportUpdates) ? latestReportUpdates : []) {
+    const serverId = String(update?.serverId || '').trim();
+    const reportTs = Number(update?.reportTs ?? update?.report_timestamp);
+    if (!serverId || !Number.isFinite(reportTs) || reportTs <= 0) continue;
+
+    const normalizedReportTs = reportTs < 10000000000 ? reportTs * 1000 : reportTs;
+    const previous = timestamps.get(serverId) || 0;
+    if (normalizedReportTs > previous) timestamps.set(serverId, normalizedReportTs);
+  }
+
+  return timestamps;
+}
+
 async function getRealtimeStateForServers(env, serverIds) {
   const normalizedServerIds = Array.from(new Set(
     (Array.isArray(serverIds) ? serverIds : [])
@@ -240,6 +256,9 @@ export async function handleServerAPI(request, env, sys) {
     getRealtimeStateForServers(env, [id])
   ]);
   mergeMetricsIntoServer(server, latestMetrics);
+  const realtimeReportTs = getLatestRealtimeReportTimestamps(realtimeState.latestReportUpdates)
+    .get(String(id));
+  if (realtimeReportTs) server.report_timestamp = realtimeReportTs;
   server.latestReportUpdates = realtimeState.latestReportUpdates;
   server.sysConfig = {
     long_history_points: Number(normalizeLongHistoryPoints(sys.long_history_points))
@@ -268,6 +287,7 @@ export async function handleServersAPI(request, env, sys) {
       : Promise.resolve(new Map())
   ]);
   attachLatencyHistoryToServers(results, latencyHistory);
+  const realtimeReportTimestamps = getLatestRealtimeReportTimestamps(realtimeState.latestReportUpdates);
   
   const now = Date.now();
   let globalOnline = 0;
@@ -276,16 +296,21 @@ export async function handleServersAPI(request, env, sys) {
   
   for (const server of results) {
     const latestMetrics = latestMetricsMap.get(server.id);
+    const realtimeReportTs = realtimeReportTimestamps.get(String(server.id)) || 0;
     
     let isOnline = false;
     
     if (latestMetrics) {
-      isOnline = (now - latestMetrics.timestamp) < 300000;
       mergeMetricsIntoServer(server, latestMetrics);
       if (shouldIncludeLatencyHistory) {
         appendLatestLatencySample(server, latestMetrics.timestamp);
       }
     }
+    if (realtimeReportTs) server.report_timestamp = realtimeReportTs;
+
+    const latestMetricsTs = Number(latestMetrics?.timestamp || 0);
+    const onlineTimestamp = Math.max(latestMetricsTs, realtimeReportTs);
+    isOnline = onlineTimestamp > 0 && (now - onlineTimestamp) < 300000;
     normalizePublicIpFields(server);
     
     if (isOnline) {

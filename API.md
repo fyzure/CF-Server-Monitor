@@ -649,13 +649,13 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 
 | 字段            | 说明                                                                    |
 | ------------- | --------------------------------------------------------------------- |
-| `servers`     | 已合并最新指标的服务器列表（按 `sort_order ASC`），未登录用户**自动过滤** **`is_hidden = '1'`** |
+| `servers`     | 已合并最新指标的服务器列表（按 `sort_order ASC`），未登录用户**自动过滤** **`is_hidden = '1'`**。若 Worker/DO 已有更近的实时上报，服务器对象会额外包含 `report_timestamp`（毫秒），前端在线状态应优先使用它而不是较旧的 D1 `last_updated` |
 | `latestReportUpdates` | 每台服务器最近一次批量上报的采样回放数据，用于新页面连续回放；来自 Worker/DO 内存状态，保留约 5 分钟，进程重启或 DO 回收后允许为空。REST 响应中的样本统一为 `{ ts, data }`，`data` 按探针批量采样包透传；内置探针默认只在普通采样点上报 `cpu`、`ram_total`、`ram_used`、`swap_total`、`swap_used`、`net_in_speed`、`net_out_speed` |
 | `stats`       | 聚合统计：在线阈值 300 秒（5 分钟无上报视为离线）                                          |
 | `regionStats` | 按 ISO 区域码（大写）统计的服务器数                                                  |
 | `sysConfig`   | 当前站点开关：`show_price`、`show_expire`、`show_tf`、`show_three_net_details`、`display_mode`。主题配置请从 `/api/config` 的 `theme_options` 读取。~~旧版示例中的 `site_title` 不在该对象内。~~（2026-07-26 修订） |
 
-> `/api/servers` 的 `latestReportUpdates` 每次请求都会读取 DO 实时状态，并与当前 Worker isolate 内约 5 分钟的最近上报回放合并。`servers[].ping` / `servers[].loss` 只在 `sysConfig.show_three_net_details === true` 时从 D1 最近 1 小时历史抽样，并在返回前合并该服务器当前最新 Ping/丢包样本；最终窗口最多 20 个点。主题可从 `/api/config.latency_window` 读取窗口参数。D1 抽样结果在当前 Worker isolate 内缓存约 2 分钟；关闭三网详情时返回空数组且不触发这部分 D1 查询。历史不足、上报中断或某个时间段无数据时不会凭空补值。
+> `/api/servers` 的 `latestReportUpdates` 每次请求都会读取 DO 实时状态，并与当前 Worker isolate 内约 5 分钟的最近上报回放合并。在线判定会取 D1 最新指标时间与实时 `reportTs` 中较新的一个，因此 Worker 冷启动或 D1 快照暂时落后时，不会先把仍在持续上报的机器误判为离线。`servers[].ping` / `servers[].loss` 只在 `sysConfig.show_three_net_details === true` 时从 D1 最近 1 小时历史抽样，并在返回前合并该服务器当前最新 Ping/丢包样本；最终窗口最多 20 个点。主题可从 `/api/config.latency_window` 读取窗口参数。D1 抽样结果在当前 Worker isolate 内缓存约 2 分钟；关闭三网详情时返回空数组且不触发这部分 D1 查询。历史不足、上报中断或某个时间段无数据时不会凭空补值。
 
 ***
 

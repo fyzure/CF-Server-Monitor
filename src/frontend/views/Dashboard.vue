@@ -909,8 +909,7 @@ const recomputeStats = (currentTs = Date.now()) => {
   const regionCounts = {}
   let unknownCount = 0
   for (const s of list) {
-    const ts = new Date(s.last_updated || 0).getTime()
-    const isOnline = ts && (currentTs - ts) < TIME.ONLINE_THRESHOLD_MS
+    const isOnline = isServerOnline(s, currentTs)
     if (isOnline) {
       online++
       speedIn += parseFloat(s.net_in_speed) || 0

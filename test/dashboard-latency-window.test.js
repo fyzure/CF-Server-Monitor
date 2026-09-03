@@ -4,7 +4,10 @@ import { Miniflare } from 'miniflare';
 
 import { getDashboardLatencyHistory } from '../src/database/schema.js';
 import { buildHistoryId } from '../src/database/indexOptimization.js';
-import { appendLatestLatencySample } from '../src/handlers/dashboard.js';
+import {
+  appendLatestLatencySample,
+  getLatestRealtimeReportTimestamps
+} from '../src/handlers/dashboard.js';
 import {
   DASHBOARD_LATENCY_WINDOW_HOURS,
   DASHBOARD_LATENCY_WINDOW_POINTS
@@ -85,6 +88,20 @@ test('dashboard latency history samples one hour from D1 into at most 20 real po
 test('dashboard latency window config exposes the public contract', () => {
   assert.equal(DASHBOARD_LATENCY_WINDOW_POINTS, 20);
   assert.equal(DASHBOARD_LATENCY_WINDOW_HOURS, 1);
+});
+
+test('dashboard prefers the freshest realtime report timestamp for online presence', () => {
+  const timestamps = getLatestRealtimeReportTimestamps([
+    { serverId: 'server-a', reportTs: 1_788_442_600 },
+    { serverId: 'server-a', reportTs: 1_788_442_605_000 },
+    { serverId: 'server-b', report_timestamp: 1_788_442_603_000 },
+    { serverId: '', reportTs: 1_788_442_604_000 },
+    { serverId: 'server-c', reportTs: 'invalid' }
+  ]);
+
+  assert.equal(timestamps.get('server-a'), 1_788_442_605_000);
+  assert.equal(timestamps.get('server-b'), 1_788_442_603_000);
+  assert.equal(timestamps.has('server-c'), false);
 });
 
 test('dashboard latency window appends the latest sample while keeping at most 20 points', () => {
