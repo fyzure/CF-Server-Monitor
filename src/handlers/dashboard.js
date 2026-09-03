@@ -208,6 +208,56 @@ export function getLatestRealtimeReportTimestamps(latestReportUpdates) {
   return timestamps;
 }
 
+export function getLatestRealtimeSamplesByServer(latestReportUpdates) {
+  const latestSamples = new Map();
+
+  for (const update of Array.isArray(latestReportUpdates) ? latestReportUpdates : []) {
+    const serverId = String(update?.serverId || '').trim();
+    if (!serverId || !Array.isArray(update?.samples)) continue;
+
+    for (const rawSample of update.samples) {
+      const sample = normalizeLatestReportSample(rawSample);
+      const sampleTs = Number(sample?.ts || 0);
+      if (!sample || !Number.isFinite(sampleTs) || sampleTs <= 0) continue;
+
+      const normalizedSampleTs = sampleTs < 10000000000 ? sampleTs * 1000 : sampleTs;
+      const previous = latestSamples.get(serverId);
+      if (!previous || normalizedSampleTs > previous.ts) {
+        latestSamples.set(serverId, {
+          ts: normalizedSampleTs,
+          data: sample.data
+        });
+      }
+    }
+  }
+
+  return latestSamples;
+}
+
+function mergeRealtimeSampleIntoServer(server, latestMetrics, realtimeSample) {
+  const latestMetricsTs = Number(latestMetrics?.timestamp || 0);
+  const realtimeSampleTs = Number(realtimeSample?.ts || 0);
+
+  if (latestMetrics) {
+    mergeMetricsIntoServer(server, latestMetrics);
+  }
+
+  if (!realtimeSample || realtimeSampleTs <= latestMetricsTs) {
+    return latestMetricsTs;
+  }
+
+  // 实时批量上报通常只携带一部分指标。叠加到 D1 最新行后再复用统一的
+  // mergeMetricsIntoServer，既能让旧主题拿到新鲜 last_updated，又不会把
+  // 本次未上报的 Ping / 系统信息等字段清成 0。
+  const mergedMetrics = {
+    ...(latestMetrics || {}),
+    ...(realtimeSample.data || {}),
+    timestamp: realtimeSampleTs
+  };
+  mergeMetricsIntoServer(server, mergedMetrics);
+  return realtimeSampleTs;
+}
+
 async function getRealtimeStateForServers(env, serverIds) {
   const normalizedServerIds = Array.from(new Set(
     (Array.isArray(serverIds) ? serverIds : [])
@@ -255,7 +305,9 @@ export async function handleServerAPI(request, env, sys) {
     getLatestMetrics(env.DB, id, server),
     getRealtimeStateForServers(env, [id])
   ]);
-  mergeMetricsIntoServer(server, latestMetrics);
+  const realtimeSample = getLatestRealtimeSamplesByServer(realtimeState.latestReportUpdates)
+    .get(String(id));
+  mergeRealtimeSampleIntoServer(server, latestMetrics, realtimeSample);
   const realtimeReportTs = getLatestRealtimeReportTimestamps(realtimeState.latestReportUpdates)
     .get(String(id));
   if (realtimeReportTs) server.report_timestamp = realtimeReportTs;
@@ -288,6 +340,7 @@ export async function handleServersAPI(request, env, sys) {
   ]);
   attachLatencyHistoryToServers(results, latencyHistory);
   const realtimeReportTimestamps = getLatestRealtimeReportTimestamps(realtimeState.latestReportUpdates);
+  const realtimeSamples = getLatestRealtimeSamplesByServer(realtimeState.latestReportUpdates);
   
   const now = Date.now();
   let globalOnline = 0;
@@ -297,19 +350,21 @@ export async function handleServersAPI(request, env, sys) {
   for (const server of results) {
     const latestMetrics = latestMetricsMap.get(server.id);
     const realtimeReportTs = realtimeReportTimestamps.get(String(server.id)) || 0;
+    const realtimeSample = realtimeSamples.get(String(server.id));
     
     let isOnline = false;
     
     if (latestMetrics) {
-      mergeMetricsIntoServer(server, latestMetrics);
       if (shouldIncludeLatencyHistory) {
+        mergeMetricsIntoServer(server, latestMetrics);
         appendLatestLatencySample(server, latestMetrics.timestamp);
       }
     }
+    const latestSampleTs = mergeRealtimeSampleIntoServer(server, latestMetrics, realtimeSample);
     if (realtimeReportTs) server.report_timestamp = realtimeReportTs;
 
     const latestMetricsTs = Number(latestMetrics?.timestamp || 0);
-    const onlineTimestamp = Math.max(latestMetricsTs, realtimeReportTs);
+    const onlineTimestamp = Math.max(latestMetricsTs, latestSampleTs, realtimeReportTs);
     isOnline = onlineTimestamp > 0 && (now - onlineTimestamp) < 300000;
     normalizePublicIpFields(server);
     

@@ -6,6 +6,7 @@ import { getDashboardLatencyHistory } from '../src/database/schema.js';
 import { buildHistoryId } from '../src/database/indexOptimization.js';
 import {
   appendLatestLatencySample,
+  getLatestRealtimeSamplesByServer,
   getLatestRealtimeReportTimestamps
 } from '../src/handlers/dashboard.js';
 import {
@@ -102,6 +103,31 @@ test('dashboard prefers the freshest realtime report timestamp for online presen
   assert.equal(timestamps.get('server-a'), 1_788_442_605_000);
   assert.equal(timestamps.get('server-b'), 1_788_442_603_000);
   assert.equal(timestamps.has('server-c'), false);
+});
+
+test('dashboard exposes the freshest realtime sample so legacy themes receive a fresh last_updated', () => {
+  const samples = getLatestRealtimeSamplesByServer([
+    {
+      serverId: 'server-a',
+      samples: [
+        { ts: 1_788_442_600, data: { cpu: 12 } },
+        { ts: 1_788_442_605_000, data: { cpu: 18, net_in_speed: 1024 } }
+      ]
+    },
+    {
+      serverId: 'server-b',
+      samples: [{ timestamp: 1_788_442_603_000, data: { cpu: 7 } }]
+    }
+  ]);
+
+  assert.deepEqual(samples.get('server-a'), {
+    ts: 1_788_442_605_000,
+    data: { cpu: 18, net_in_speed: 1024 }
+  });
+  assert.deepEqual(samples.get('server-b'), {
+    ts: 1_788_442_603_000,
+    data: { cpu: 7 }
+  });
 });
 
 test('dashboard latency window appends the latest sample while keeping at most 20 points', () => {
