@@ -258,6 +258,20 @@ function mergeRealtimeSampleIntoServer(server, latestMetrics, realtimeSample) {
   return realtimeSampleTs;
 }
 
+export function isServerOnlineAt(now, ...timestamps) {
+  const currentTs = Number(now);
+  const onlineTimestamp = Math.max(
+    0,
+    ...timestamps.map(timestamp => {
+      const value = Number(timestamp || 0);
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    })
+  );
+  return Number.isFinite(currentTs)
+    && onlineTimestamp > 0
+    && (currentTs - onlineTimestamp) < 300000;
+}
+
 async function getRealtimeStateForServers(env, serverIds) {
   const normalizedServerIds = Array.from(new Set(
     (Array.isArray(serverIds) ? serverIds : [])
@@ -307,10 +321,16 @@ export async function handleServerAPI(request, env, sys) {
   ]);
   const realtimeSample = getLatestRealtimeSamplesByServer(realtimeState.latestReportUpdates)
     .get(String(id));
-  mergeRealtimeSampleIntoServer(server, latestMetrics, realtimeSample);
+  const latestSampleTs = mergeRealtimeSampleIntoServer(server, latestMetrics, realtimeSample);
   const realtimeReportTs = getLatestRealtimeReportTimestamps(realtimeState.latestReportUpdates)
     .get(String(id));
   if (realtimeReportTs) server.report_timestamp = realtimeReportTs;
+  server.is_online = isServerOnlineAt(
+    Date.now(),
+    latestMetrics?.timestamp,
+    latestSampleTs,
+    realtimeReportTs
+  );
   server.latestReportUpdates = realtimeState.latestReportUpdates;
   server.sysConfig = {
     long_history_points: Number(normalizeLongHistoryPoints(sys.long_history_points))
@@ -364,8 +384,10 @@ export async function handleServersAPI(request, env, sys) {
     if (realtimeReportTs) server.report_timestamp = realtimeReportTs;
 
     const latestMetricsTs = Number(latestMetrics?.timestamp || 0);
-    const onlineTimestamp = Math.max(latestMetricsTs, latestSampleTs, realtimeReportTs);
-    isOnline = onlineTimestamp > 0 && (now - onlineTimestamp) < 300000;
+    isOnline = isServerOnlineAt(now, latestMetricsTs, latestSampleTs, realtimeReportTs);
+    // 外部主题（包括当前固定的 LuminaPlus 1.2.6）会优先读取该字段。
+    // 必须把后端已经算出的逐节点在线状态写回服务器对象，不能只汇总到 stats。
+    server.is_online = isOnline;
     normalizePublicIpFields(server);
     
     if (isOnline) {

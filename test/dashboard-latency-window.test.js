@@ -7,7 +7,8 @@ import { buildHistoryId } from '../src/database/indexOptimization.js';
 import {
   appendLatestLatencySample,
   getLatestRealtimeSamplesByServer,
-  getLatestRealtimeReportTimestamps
+  getLatestRealtimeReportTimestamps,
+  isServerOnlineAt
 } from '../src/handlers/dashboard.js';
 import {
   DASHBOARD_LATENCY_WINDOW_HOURS,
@@ -128,6 +129,15 @@ test('dashboard exposes the freshest realtime sample so legacy themes receive a 
     ts: 1_788_442_603_000,
     data: { cpu: 7 }
   });
+});
+
+test('dashboard per-server online status uses the freshest available presence timestamp', () => {
+  const now = 1_788_442_900_000;
+
+  assert.equal(isServerOnlineAt(now, now - 299_999), true);
+  assert.equal(isServerOnlineAt(now, now - 300_000), false);
+  assert.equal(isServerOnlineAt(now, now - 600_000, now - 1_000), true);
+  assert.equal(isServerOnlineAt(now, 0, undefined, null), false);
 });
 
 test('dashboard latency window appends the latest sample while keeping at most 20 points', () => {
