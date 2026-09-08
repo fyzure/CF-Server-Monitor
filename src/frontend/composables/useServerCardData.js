@@ -171,50 +171,6 @@ export function useServerCardData(props) {
   const totalTxMonthly = computed(() => formatBytes(props.server.net_tx_monthly))
   const priceText = computed(() => formatBillingPrice(props.server, currentLang.value))
 
-  const nsmcSessionStatus = computed(() => {
-    const rawState = String(props.server.nsmc_session_state || '').trim().toLowerCase()
-    if (!rawState) return null
-
-    const checkedAt = normalizeLatencyTimestamp(props.server.nsmc_session_checked_at, 0)
-    const ageMs = checkedAt ? Math.max(0, currentTime.value - checkedAt) : Number.POSITIVE_INFINITY
-    const stale = !checkedAt || ageMs > 45 * 60 * 1000
-    const zh = currentLang.value === 'zh'
-    let label
-    let color
-    let state = rawState
-
-    if (stale) {
-      state = 'stale'
-      label = zh ? 'NSMC 状态过期' : 'NSMC stale'
-      color = 'var(--accent-yellow)'
-    } else if (rawState === 'valid') {
-      label = zh ? 'NSMC 有效' : 'NSMC valid'
-      color = 'var(--accent-green)'
-    } else if (rawState === 'auth_required') {
-      label = zh ? 'NSMC 需登录' : 'NSMC login required'
-      color = 'var(--accent-red)'
-    } else {
-      label = zh ? 'NSMC 检查异常' : 'NSMC check error'
-      color = 'var(--accent-yellow)'
-    }
-
-    let ageText = ''
-    if (checkedAt) {
-      const seconds = Math.floor(ageMs / 1000)
-      if (seconds < 90) ageText = zh ? '刚刚' : 'just now'
-      else if (seconds < 3600) ageText = zh ? `${Math.floor(seconds / 60)}分钟前` : `${Math.floor(seconds / 60)}m ago`
-      else ageText = zh ? `${Math.floor(seconds / 3600)}小时前` : `${Math.floor(seconds / 3600)}h ago`
-    }
-
-    return {
-      state,
-      label,
-      color,
-      ageText,
-      title: checkedAt ? new Date(checkedAt).toLocaleString() : '',
-      account: String(props.server.nsmc_session_account || '')
-    }
-  })
 
   const formatDateOnly = (value) => {
     const raw = String(value || '').trim()
@@ -502,7 +458,6 @@ export function useServerCardData(props) {
     totalRxMonthly,
     totalTxMonthly,
     priceText,
-    nsmcSessionStatus,
     expireDateTitle,
     loadAvg,
     uptimeText,

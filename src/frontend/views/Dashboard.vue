@@ -372,7 +372,7 @@ import ServerRingCard from '../components/ServerRingCard.vue'
 import Footer from '../components/Footer.vue'
 import OsIcon from '../components/OsIcon.vue'
 import LiveConnectionTimeoutModal from '../components/LiveConnectionTimeoutModal.vue'
-import { fetchConfig, fetchServersAll, fetchServersAllWithProgress, fetchNsmcStatusesAll, formatBytes, createLiveSocket, getFlagRegionCode, getApiBases, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
+import { fetchConfig, fetchServersAll, fetchServersAllWithProgress, formatBytes, createLiveSocket, getFlagRegionCode, getApiBases, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
 import { calcTrafficUsagePercent, getUsageColor } from '../composables/useServerCardData'
 import { getTitle, hasMultipleApiBases, getPublicAssetUrl } from '../utils/config'
 import { currentLang, useTranslation } from '../utils/i18n.js'
@@ -1069,29 +1069,6 @@ let liveSockets = []
 let liveConnectionClosedByUser = false
 let themeObserver = null
 let timeUpdateInterval = null
-let nsmcStatusRefreshInterval = null
-
-const refreshNsmcStatuses = async () => {
-  if (typeof document !== 'undefined' && document.hidden) return
-  try {
-    const statuses = await fetchNsmcStatusesAll()
-    for (const status of statuses) {
-      const index = servers.value.findIndex(server => (
-        String(server.id) === String(status.id) &&
-        (!status.source || !server.source || status.source === server.source)
-      ))
-      if (index < 0) continue
-      servers.value[index] = {
-        ...servers.value[index],
-        nsmc_session_state: status.state,
-        nsmc_session_checked_at: status.checked_at,
-        nsmc_session_account: status.account || ''
-      }
-    }
-  } catch (e) {
-    console.log('[INFO] NSMC status refresh pending...', e)
-  }
-}
 
 const stopLiveSockets = () => {
   if (liveSockets.length === 0) return
@@ -1345,7 +1322,6 @@ onMounted(async () => {
   // 每秒更新 now 变量，使相对时间实时刷新
   runDashboardTick()
   timeUpdateInterval = setInterval(runDashboardTick, 1000)
-  nsmcStatusRefreshInterval = setInterval(refreshNsmcStatuses, 60 * 1000)
 
   if (currentView.value === 'map') {
     switchView('map')
@@ -1369,7 +1345,6 @@ onUnmounted(() => {
   if (filterMeasureTimer) clearTimeout(filterMeasureTimer)
   if (filterResizeObserver) filterResizeObserver.disconnect()
   if (timeUpdateInterval) clearInterval(timeUpdateInterval)
-  if (nsmcStatusRefreshInterval) clearInterval(nsmcStatusRefreshInterval)
   stopLiveSockets()
   if (themeObserver) themeObserver.disconnect()
 })

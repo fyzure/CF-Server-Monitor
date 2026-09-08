@@ -36,16 +36,6 @@
 
     <div class="server-card-ring-divider"></div>
 
-    <div
-      v-if="nsmcSessionStatus"
-      class="nsmc-session-status nsmc-session-status-ring"
-      :title="nsmcSessionStatus.title"
-    >
-      <span class="nsmc-session-dot" :style="{ background: nsmcSessionStatus.color }"></span>
-      <span :style="{ color: nsmcSessionStatus.color }">{{ nsmcSessionStatus.label }}</span>
-      <span v-if="nsmcSessionStatus.ageText" class="nsmc-session-age">{{ nsmcSessionStatus.ageText }}</span>
-    </div>
-
     <div class="server-card-ring-metrics">
       <div class="metric-ring-item">
         <div class="metric-ring-chart" :style="getRingStyle(cpuPercent, getUsageColor(cpuPercent))">
@@ -180,7 +170,6 @@ const {
   totalRx,
   totalTx,
   priceText,
-  nsmcSessionStatus,
   expireDateTitle,
   loadAvg,
   ramUsageText,

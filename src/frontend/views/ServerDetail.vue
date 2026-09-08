@@ -108,6 +108,15 @@
           <span class="sysinfo-label">⏰ {{ trans.lastUpdate }}</span>
           <span class="sysinfo-value sysinfo-small">{{ lastUpdateText }}</span>
         </div>
+        <div class="sysinfo-item" v-if="nsmcSessionStatus">
+          <span class="sysinfo-label">🔐 NSMC Session</span>
+          <span class="sysinfo-value sysinfo-small nsmc-detail-status" :title="nsmcSessionStatus.title">
+            <span class="nsmc-session-dot" :style="{ background: nsmcSessionStatus.color }"></span>
+            <span :style="{ color: nsmcSessionStatus.color }">{{ nsmcSessionStatus.label }}</span>
+            <span v-if="nsmcSessionStatus.account" class="nsmc-detail-account">· {{ nsmcSessionStatus.account }}</span>
+            <span v-if="nsmcSessionStatus.ageText" class="nsmc-session-age">· {{ nsmcSessionStatus.ageText }}</span>
+          </span>
+        </div>
       </div>
     </div>
 
@@ -355,7 +364,7 @@ import TerminalHeader from '../components/TerminalHeader.vue'
 import Footer from '../components/Footer.vue'
 import OsIcon from '../components/OsIcon.vue'
 import LiveConnectionTimeoutModal from '../components/LiveConnectionTimeoutModal.vue'
-import { fetchServerDetail, fetchAllHistory, fetchConfig, formatBytes, isAdminLoggedIn, createLiveSocket, getFlagRegionCode, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
+import { fetchServerDetail, fetchAllHistory, fetchConfig, fetchNsmcStatuses, formatBytes, isAdminLoggedIn, createLiveSocket, getFlagRegionCode, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
 import { getTrafficUsageBytes } from '../composables/useServerCardData'
 import { getPublicAssetUrl } from '../utils/config.js'
 import Chart from 'chart.js/auto'
@@ -399,8 +408,71 @@ const showLoginModal = ref(false)
 const showLiveTimeoutModal = ref(false)
 const frontendWsTimeoutMinutes = ref(0)
 const loading = ref(true)
+const nsmcStatusNow = ref(Date.now())
+let nsmcStatusRefreshInterval = null
+let nsmcStatusClockInterval = null
 
 const trans = useTranslation()
+
+const nsmcSessionStatus = computed(() => {
+  const rawState = String(server.value.nsmc_session_state || '').trim().toLowerCase()
+  if (!rawState) return null
+
+  const checkedAt = normalizeMetricTimestamp(server.value.nsmc_session_checked_at, 0)
+  const ageMs = checkedAt ? Math.max(0, nsmcStatusNow.value - checkedAt) : Number.POSITIVE_INFINITY
+  const stale = !checkedAt || ageMs > 45 * 60 * 1000
+  const zh = currentLang.value !== 'en'
+  let label
+  let color
+
+  if (stale) {
+    label = zh ? '状态过期' : 'Stale'
+    color = 'var(--accent-yellow)'
+  } else if (rawState === 'valid') {
+    label = zh ? '有效' : 'Valid'
+    color = 'var(--accent-green)'
+  } else if (rawState === 'auth_required') {
+    label = zh ? '需重新登录' : 'Login required'
+    color = 'var(--accent-red)'
+  } else {
+    label = zh ? '检查异常' : 'Check error'
+    color = 'var(--accent-yellow)'
+  }
+
+  let ageText = ''
+  if (checkedAt) {
+    const seconds = Math.floor(ageMs / 1000)
+    if (seconds < 90) ageText = zh ? '刚刚检查' : 'checked just now'
+    else if (seconds < 3600) ageText = zh ? `${Math.floor(seconds / 60)} 分钟前检查` : `checked ${Math.floor(seconds / 60)}m ago`
+    else ageText = zh ? `${Math.floor(seconds / 3600)} 小时前检查` : `checked ${Math.floor(seconds / 3600)}h ago`
+  }
+
+  return {
+    label,
+    color,
+    ageText,
+    account: String(server.value.nsmc_session_account || ''),
+    title: checkedAt ? new Date(checkedAt).toLocaleString() : ''
+  }
+})
+
+const refreshNsmcStatus = async () => {
+  if (typeof document !== 'undefined' && document.hidden) return
+  try {
+    const statuses = await fetchNsmcStatuses(apiIndex.value)
+    const status = statuses.find(item => String(item?.id) === String(serverId))
+    if (!status) return
+    server.value = {
+      ...server.value,
+      nsmc_session_state: status.state,
+      nsmc_session_checked_at: status.checked_at,
+      nsmc_session_account: status.account || ''
+    }
+    nsmcStatusNow.value = Date.now()
+  } catch (e) {
+    console.log('[INFO] NSMC detail status refresh pending...', e)
+  }
+}
 
 const ChartExpandButton = {
   props: {
@@ -1727,6 +1799,10 @@ const init = async () => {
   }, apiIndex.value)
 
   document.addEventListener('visibilitychange', handleVisibility)
+  nsmcStatusRefreshInterval = setInterval(refreshNsmcStatus, 60 * 1000)
+  nsmcStatusClockInterval = setInterval(() => {
+    nsmcStatusNow.value = Date.now()
+  }, 30 * 1000)
 }
 
 watch([cpuChartRef, gpuChartRef, ramChartRef, diskChartRef, diskIoChartRef, netChartRef, procChartRef, connChartRef, pingChartRef, lossChartRef, loadChartRef], () => {
@@ -1742,6 +1818,8 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleVisibility)
   if (liveSocket) liveSocket.close()
+  if (nsmcStatusRefreshInterval) clearInterval(nsmcStatusRefreshInterval)
+  if (nsmcStatusClockInterval) clearInterval(nsmcStatusClockInterval)
   clearLatestReportReplayTimers()
   lastGpuSignature = ''
   safeDestroyCharts()
