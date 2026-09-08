@@ -279,7 +279,7 @@ test('Durable Object rejects Agent WSS upgrade when report is disabled', async (
   assert.equal(body.code, 409);
   assert.equal(body.text, 'wss_disabled');
   assert.equal(body.connection_mode, 'http');
-  assert.equal(broadcaster.standardAgentWebSocketCount, 0);
+  assert.equal(broadcaster._getAgentReportWebSockets().length, 0);
 });
 
 test('WSS agent config state only requests ack for fields in current report', () => {
