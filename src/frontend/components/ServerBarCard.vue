@@ -31,6 +31,15 @@
         </template>
       </div>
     </div>
+    <div
+      v-if="nsmcSessionStatus"
+      class="nsmc-session-status"
+      :title="nsmcSessionStatus.title"
+    >
+      <span class="nsmc-session-dot" :style="{ background: nsmcSessionStatus.color }"></span>
+      <span :style="{ color: nsmcSessionStatus.color }">{{ nsmcSessionStatus.label }}</span>
+      <span v-if="nsmcSessionStatus.ageText" class="nsmc-session-age">{{ nsmcSessionStatus.ageText }}</span>
+    </div>
     <div class="server-stats">
       <div class="stat-row">
         <span class="stat-key">CPU</span>
@@ -157,6 +166,7 @@ const {
   totalRxMonthly,
   totalTxMonthly,
   priceText,
+  nsmcSessionStatus,
   expireDateTitle,
   loadAvg,
   isExpired,

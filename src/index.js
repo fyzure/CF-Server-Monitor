@@ -6,6 +6,7 @@ import { serveFrontend } from './handlers/frontend.js';
 import { handleUpdate, handleWebSocketUpgrade, handleUpdateWebSocketUpgrade } from './handlers/update.js';
 import { handleServerAPI, handleServersAPI } from './handlers/dashboard.js';
 import { handleTheme } from './handlers/theme.js';
+import { handleNsmcStatusAPI, handleNsmcStatusUpdate } from './handlers/nsmcStatus.js';
 import { isValidThemeOptions, loadSettings, loadSiteSettings, loadAppearanceOptions, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, saveThemeOptions, setDebug, debug } from './utils/settings.js';
 import { checkAuth, simpleAuthResponse } from './middleware/auth.js';
 import { getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from './utils/cache.js';
@@ -262,6 +263,7 @@ export default {
 
     const routes = [
       { method: 'POST', path: '/update', handler: () => handleUpdate(request, env, ctx) },
+      { method: 'POST', path: '/update/nsmc-status', handler: () => handleNsmcStatusUpdate(request, env) },
       { method: 'GET', path: '/update', handler: () => handleUpdateWebSocketUpgrade(request, env) },
       { method: 'GET', path: '/__do/health', handler: async () => {
         if (!env.METRICS_BROADCASTER) {
@@ -376,6 +378,10 @@ export default {
       { method: 'GET', path: '/api/servers', handler: async () => {
         await ensureFullSettings();
         return handleServersAPI(request, env, sys);
+      }},
+      { method: 'GET', path: '/api/nsmc-status', handler: async () => {
+        await ensureSiteSettings();
+        return handleNsmcStatusAPI(request, env, sys);
       }},
       { method: 'GET', path: '/api/ws', handler: async () => handleWebSocketUpgrade(request, env) },
 

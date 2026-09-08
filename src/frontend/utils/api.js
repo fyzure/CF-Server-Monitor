@@ -307,6 +307,19 @@ export const fetchServersAll = async () => {
   return mergedData
 }
 
+export const fetchNsmcStatusesAll = async () => {
+  const results = await http.getAll('/api/nsmc-status', { autoRedirect: false })
+  const statuses = []
+  for (const result of results) {
+    if (result.error || !Array.isArray(result.data?.statuses)) continue
+    for (const status of result.data.statuses) {
+      if (!status?.id) continue
+      statuses.push({ ...status, source: result.baseUrl })
+    }
+  }
+  return statuses
+}
+
 const createEmptyMergedData = () => ({
   servers: [],
   latestReportUpdates: [],

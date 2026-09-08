@@ -1,3 +1,34 @@
+.nsmc-session-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  margin: 2px 0 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.nsmc-session-status-ring {
+  margin: 8px 0 2px;
+}
+
+.nsmc-session-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.nsmc-session-age {
+  margin-left: auto;
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
 /* ==========================================================================
    CloudFlare Server Monitor - Main Stylesheet
    ========================================================================== */
