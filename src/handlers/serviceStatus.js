@@ -100,15 +100,19 @@ function parseLegacyNsmcStatus(row) {
 }
 
 export async function getServiceStatuses(db, serverId = null) {
-  const genericPattern = serverId
-    ? `${STATUS_PREFIX}${serverId}:%`
-    : `${STATUS_PREFIX}%`;
-  const legacyPattern = serverId
+  const genericPrefix = serverId
+    ? `${STATUS_PREFIX}${serverId}:`
+    : STATUS_PREFIX;
+  const legacyPrefix = serverId
     ? `${LEGACY_NSMC_PREFIX}${serverId}`
-    : `${LEGACY_NSMC_PREFIX}%`;
-  const result = await db.prepare(
-    'SELECT key, value FROM settings WHERE key LIKE ? OR key LIKE ?'
-  ).bind(genericPattern, legacyPattern).all();
+    : LEGACY_NSMC_PREFIX;
+  const result = serverId
+    ? await db.prepare(
+      'SELECT key, value FROM settings WHERE instr(key, ?) = 1 OR key = ?'
+    ).bind(genericPrefix, legacyPrefix).all()
+    : await db.prepare(
+      'SELECT key, value FROM settings WHERE instr(key, ?) = 1 OR instr(key, ?) = 1'
+    ).bind(genericPrefix, legacyPrefix).all();
 
   const statuses = new Map();
   for (const row of result?.results || []) {
