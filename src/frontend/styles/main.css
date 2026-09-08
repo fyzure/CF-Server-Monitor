@@ -1,25 +1,129 @@
-.nsmc-session-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
-  border-radius: 50%;
-  box-shadow: 0 0 6px currentColor;
+.service-status-panel {
+  margin: 22px 0 28px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  overflow: hidden;
 }
 
-.nsmc-session-age {
-  color: var(--text-secondary);
-  opacity: 0.8;
-}
-
-.nsmc-detail-status {
-  display: inline-flex;
+.service-status-header {
+  display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 5px;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border-color);
 }
 
-.nsmc-detail-account {
+.service-status-title {
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.service-status-summary,
+.service-status-message,
+.service-status-age {
+  margin-top: 3px;
+  font-size: 12px;
   color: var(--text-secondary);
+}
+
+.service-status-overall,
+.service-status-name-block,
+.service-status-meta {
+  display: flex;
+  align-items: center;
+}
+
+.service-status-overall {
+  gap: 7px;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.service-status-list {
+  display: grid;
+}
+
+.service-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 15px 20px;
+  border-top: 1px solid var(--border-color);
+}
+
+.service-status-row:first-child {
+  border-top: 0;
+}
+
+.service-status-name-block {
+  gap: 10px;
+  min-width: 0;
+}
+
+.service-status-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.service-status-meta {
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.service-status-state {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.service-status-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+
+.service-status-dot[data-state='operational'],
+.service-status-overall[data-state='operational'] .service-status-dot { background: var(--accent-green); }
+.service-status-state[data-state='operational'],
+.service-status-overall[data-state='operational'] { color: var(--accent-green); }
+
+.service-status-dot[data-state='degraded'],
+.service-status-dot[data-state='maintenance'],
+.service-status-dot[data-state='auth_required'],
+.service-status-overall[data-state='degraded'] .service-status-dot { background: var(--accent-yellow); }
+.service-status-state[data-state='degraded'],
+.service-status-state[data-state='maintenance'],
+.service-status-state[data-state='auth_required'],
+.service-status-overall[data-state='degraded'] { color: var(--accent-yellow); }
+
+.service-status-dot[data-state='unavailable'],
+.service-status-dot[data-state='error'],
+.service-status-dot[data-state='stale'],
+.service-status-overall[data-state='unavailable'] .service-status-dot { background: var(--accent-red); }
+.service-status-state[data-state='unavailable'],
+.service-status-state[data-state='error'],
+.service-status-state[data-state='stale'],
+.service-status-overall[data-state='unavailable'] { color: var(--accent-red); }
+
+@media (max-width: 640px) {
+  .service-status-header,
+  .service-status-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .service-status-meta {
+    width: 100%;
+    justify-content: space-between;
+    padding-left: 19px;
+  }
 }
 /* ==========================================================================
    CloudFlare Server Monitor - Main Stylesheet

@@ -28,6 +28,7 @@
   - [0.6 CORS](#06-cors)
 - [1. 探针上报接口](#1-探针上报接口)
   - [1.1](#11-post-update---指标上报agent-入口) [`POST /update`](#11-post-update---指标上报agent-入口) [- 指标上报（Agent 入口）](#11-post-update---指标上报agent-入口)
+  - [1.2](#12-post-updateservice-status---服务状态上报) [`POST /update/service-status`](#12-post-updateservice-status---服务状态上报) [- 服务状态上报](#12-post-updateservice-status---服务状态上报)
 - [2. 公开 API（前端/管理端共用）](#2-公开-api前端管理端共用)
   - [2.1](#21-get-apiconfig---获取站点配置) [`GET /api/config`](#21-get-apiconfig---获取站点配置) [- 获取站点配置](#21-get-apiconfig---获取站点配置)
   - [2.1.1](#211-post-apitheme_options---保存第三方主题配置) [`POST /api/theme_options`](#211-post-apitheme_options---保存第三方主题配置) [- 保存第三方主题配置](#211-post-apitheme_options---保存第三方主题配置)
@@ -37,6 +38,7 @@
   - [2.5](#25-get-apiws---websocket-实时推送) [`GET /api/ws`](#25-get-apiws---websocket-实时推送) [- WebSocket 实时推送](#25-get-apiws---websocket-实时推送)
   - [2.6](#26-get-theme---获取主题商店数据) [`GET /theme`](#26-get-theme---获取主题商店数据) [- 获取主题商店数据](#26-get-theme---获取主题商店数据)
   - [2.7](#27-前端与主题代理) [前端与主题代理](#27-前端与主题代理)
+  - [2.8](#28-get-apiservice-status---读取服务状态) [`GET /api/service-status`](#28-get-apiservice-status---读取服务状态) [- 读取服务状态](#28-get-apiservice-status---读取服务状态)
 - [3. 管理端 API（鉴权）](#3-管理端-api鉴权)
   - [3.1](#31-post-adminapi---管理操作入口) [`POST /admin/api`](#31-post-adminapi---管理操作入口) [- 管理操作入口](#31-post-adminapi---管理操作入口)
   - [3.2](#32-action-login---登录) [`action: login`](#32-action-login---登录) [- 登录](#32-action-login---登录)
@@ -476,6 +478,30 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 1. `POST /update` 的 `metrics_history` 只写入本次请求中最新的一个样本；`wss://.../update` 首条成功指标立即写入一次，后续按服务器 `report_interval` 最多写入一次 D1。
 2. 触发 Durable Object `MetricsBroadcaster` 内部广播，统一发送 `{type:"batchUpdate", ts, updates:[...]}` 格式，前端按样本时间逐个回放。
 3. 写入 `request.cf.country`（或 `cf-ipcountry` Header）作为该条记录的 `region` 字段。~~服务端会统一转大写。~~ **2026-07-26 修订**：当前按原值入库；Cloudflare 的国家代码通常为大写，但自定义回退 Header 不会被规范化。
+
+### 1.2 `POST /update/service-status` - 服务状态上报
+
+用于向服务器详情页的独立“服务状态”区块上报任意服务健康状态。该接口不写入系统性能指标，也不会改变服务器在线判定。
+
+```json
+{
+  "id": "<server-id>",
+  "secret": "<API_SECRET>",
+  "service": "nsmc",
+  "label": "NSMC DataPortal",
+  "state": "operational",
+  "checked_at": 1788878825859,
+  "message": "Session valid"
+}
+```
+
+- `service`：稳定、简短的服务 ID，允许 `a-z / 0-9 / . _ -`，最长 64。
+- `label`：展示名称，最长 80。
+- `state`：`operational | degraded | unavailable | maintenance | auth_required | error`。
+- `checked_at`：秒或毫秒 Unix 时间戳。
+- `message`：可选短说明，最长 240；不得放 Cookie、token、密码等敏感信息。
+- 同一 `id + service` 再次上报会原子覆盖上一条状态。
+- 兼容期内 `POST /update/nsmc-status` 仍可用，并会被映射为 `service=nsmc`。
 
 ***
 
@@ -1080,6 +1106,33 @@ https://github.com/<owner>/<theme-repo>/tree/<commit-or-branch>[/theme-subdir]
 **预览鉴权**：
 
 `/?theme_url=...` 只在已登录管理员通过 `start_theme_preview` 获取临时授权后生效。授权 cookie 有效期 10 分钟；未授权直接访问会返回 `401 Theme preview requires admin login`。
+
+***
+
+### 2.8 `GET /api/service-status` - 读取服务状态
+
+读取当前可见服务器的服务状态。传 `id` 时只返回单台服务器：
+
+```http
+GET /api/service-status?id=<server-id>
+```
+
+```json
+{
+  "services": [
+    {
+      "id": "<server-id>",
+      "service": "nsmc",
+      "label": "NSMC DataPortal",
+      "state": "operational",
+      "checked_at": 1788878825859,
+      "message": "Session valid"
+    }
+  ]
+}
+```
+
+前端可自行将超过预期检查周期的记录显示为 stale；服务端不会擅自改写上报状态。
 
 ***
 

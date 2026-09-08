@@ -108,15 +108,6 @@
           <span class="sysinfo-label">⏰ {{ trans.lastUpdate }}</span>
           <span class="sysinfo-value sysinfo-small">{{ lastUpdateText }}</span>
         </div>
-        <div class="sysinfo-item" v-if="nsmcSessionStatus">
-          <span class="sysinfo-label">🔐 NSMC Session</span>
-          <span class="sysinfo-value sysinfo-small nsmc-detail-status" :title="nsmcSessionStatus.title">
-            <span class="nsmc-session-dot" :style="{ background: nsmcSessionStatus.color }"></span>
-            <span :style="{ color: nsmcSessionStatus.color }">{{ nsmcSessionStatus.label }}</span>
-            <span v-if="nsmcSessionStatus.account" class="nsmc-detail-account">· {{ nsmcSessionStatus.account }}</span>
-            <span v-if="nsmcSessionStatus.ageText" class="nsmc-session-age">· {{ nsmcSessionStatus.ageText }}</span>
-          </span>
-        </div>
       </div>
     </div>
 
@@ -328,6 +319,34 @@
         </div>
       </div>
     </div>
+
+    <section v-if="serviceStatusRows.length" class="service-status-panel" aria-label="Service status">
+      <div class="service-status-header">
+        <div>
+          <div class="service-status-title">{{ currentLang === 'en' ? 'Service status' : '服务状态' }}</div>
+          <div class="service-status-summary">{{ serviceStatusSummary }}</div>
+        </div>
+        <span class="service-status-overall" :data-state="serviceStatusOverallState">
+          <span class="service-status-dot"></span>
+          {{ serviceStatusOverallLabel }}
+        </span>
+      </div>
+      <div class="service-status-list">
+        <div v-for="item in serviceStatusRows" :key="`${item.id}:${item.service}`" class="service-status-row">
+          <div class="service-status-name-block">
+            <span class="service-status-dot" :data-state="item.displayState"></span>
+            <div>
+              <div class="service-status-name">{{ item.label }}</div>
+              <div v-if="item.message" class="service-status-message">{{ item.message }}</div>
+            </div>
+          </div>
+          <div class="service-status-meta">
+            <span class="service-status-state" :data-state="item.displayState">{{ item.stateLabel }}</span>
+            <span class="service-status-age" :title="item.checkedTitle">{{ item.ageText }}</span>
+          </div>
+        </div>
+      </div>
+    </section>
     </template>
 
     <Footer />
@@ -364,7 +383,7 @@ import TerminalHeader from '../components/TerminalHeader.vue'
 import Footer from '../components/Footer.vue'
 import OsIcon from '../components/OsIcon.vue'
 import LiveConnectionTimeoutModal from '../components/LiveConnectionTimeoutModal.vue'
-import { fetchServerDetail, fetchAllHistory, fetchConfig, fetchNsmcStatuses, formatBytes, isAdminLoggedIn, createLiveSocket, getFlagRegionCode, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
+import { fetchServerDetail, fetchAllHistory, fetchConfig, fetchServiceStatuses, formatBytes, isAdminLoggedIn, createLiveSocket, getFlagRegionCode, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
 import { getTrafficUsageBytes } from '../composables/useServerCardData'
 import { getPublicAssetUrl } from '../utils/config.js'
 import Chart from 'chart.js/auto'
@@ -408,69 +427,73 @@ const showLoginModal = ref(false)
 const showLiveTimeoutModal = ref(false)
 const frontendWsTimeoutMinutes = ref(0)
 const loading = ref(true)
-const nsmcStatusNow = ref(Date.now())
-let nsmcStatusRefreshInterval = null
-let nsmcStatusClockInterval = null
+const serviceStatuses = ref([])
+const serviceStatusNow = ref(Date.now())
+let serviceStatusRefreshInterval = null
+let serviceStatusClockInterval = null
 
 const trans = useTranslation()
 
-const nsmcSessionStatus = computed(() => {
-  const rawState = String(server.value.nsmc_session_state || '').trim().toLowerCase()
-  if (!rawState) return null
-
-  const checkedAt = normalizeMetricTimestamp(server.value.nsmc_session_checked_at, 0)
-  const ageMs = checkedAt ? Math.max(0, nsmcStatusNow.value - checkedAt) : Number.POSITIVE_INFINITY
-  const stale = !checkedAt || ageMs > 45 * 60 * 1000
+const serviceStatusRows = computed(() => {
   const zh = currentLang.value !== 'en'
-  let label
-  let color
-
-  if (stale) {
-    label = zh ? '状态过期' : 'Stale'
-    color = 'var(--accent-yellow)'
-  } else if (rawState === 'valid') {
-    label = zh ? '有效' : 'Valid'
-    color = 'var(--accent-green)'
-  } else if (rawState === 'auth_required') {
-    label = zh ? '需重新登录' : 'Login required'
-    color = 'var(--accent-red)'
-  } else {
-    label = zh ? '检查异常' : 'Check error'
-    color = 'var(--accent-yellow)'
+  const labels = {
+    operational: zh ? '运行正常' : 'Operational',
+    degraded: zh ? '性能下降' : 'Degraded',
+    unavailable: zh ? '不可用' : 'Unavailable',
+    maintenance: zh ? '维护中' : 'Maintenance',
+    auth_required: zh ? '需要登录' : 'Login required',
+    error: zh ? '检查异常' : 'Check error',
+    stale: zh ? '状态过期' : 'Stale'
   }
-
-  let ageText = ''
-  if (checkedAt) {
-    const seconds = Math.floor(ageMs / 1000)
-    if (seconds < 90) ageText = zh ? '刚刚检查' : 'checked just now'
-    else if (seconds < 3600) ageText = zh ? `${Math.floor(seconds / 60)} 分钟前检查` : `checked ${Math.floor(seconds / 60)}m ago`
-    else ageText = zh ? `${Math.floor(seconds / 3600)} 小时前检查` : `checked ${Math.floor(seconds / 3600)}h ago`
-  }
-
-  return {
-    label,
-    color,
-    ageText,
-    account: String(server.value.nsmc_session_account || ''),
-    title: checkedAt ? new Date(checkedAt).toLocaleString() : ''
-  }
+  return serviceStatuses.value.map(item => {
+    const checkedAt = normalizeMetricTimestamp(item?.checked_at, 0)
+    const ageMs = checkedAt ? Math.max(0, serviceStatusNow.value - checkedAt) : Number.POSITIVE_INFINITY
+    const stale = !checkedAt || ageMs > 45 * 60 * 1000
+    const rawState = String(item?.state || 'error').toLowerCase()
+    const displayState = stale ? 'stale' : rawState
+    const seconds = checkedAt ? Math.floor(ageMs / 1000) : 0
+    let ageText = zh ? '无检查时间' : 'No check time'
+    if (checkedAt && seconds < 90) ageText = zh ? '刚刚检查' : 'Checked just now'
+    else if (checkedAt && seconds < 3600) ageText = zh ? `${Math.floor(seconds / 60)} 分钟前` : `${Math.floor(seconds / 60)}m ago`
+    else if (checkedAt) ageText = zh ? `${Math.floor(seconds / 3600)} 小时前` : `${Math.floor(seconds / 3600)}h ago`
+    return {
+      ...item,
+      displayState,
+      stateLabel: labels[displayState] || labels.error,
+      ageText,
+      checkedTitle: checkedAt ? new Date(checkedAt).toLocaleString() : ''
+    }
+  })
 })
 
-const refreshNsmcStatus = async () => {
+const serviceStatusOverallState = computed(() => {
+  if (!serviceStatusRows.value.length) return 'unknown'
+  if (serviceStatusRows.value.every(item => item.displayState === 'operational')) return 'operational'
+  if (serviceStatusRows.value.some(item => ['unavailable', 'error', 'stale'].includes(item.displayState))) return 'unavailable'
+  return 'degraded'
+})
+
+const serviceStatusOverallLabel = computed(() => {
+  const zh = currentLang.value !== 'en'
+  if (serviceStatusOverallState.value === 'operational') return zh ? '所有服务正常' : 'All systems operational'
+  if (serviceStatusOverallState.value === 'degraded') return zh ? '部分服务需要关注' : 'Some systems need attention'
+  return zh ? '存在服务异常' : 'Service issues detected'
+})
+
+const serviceStatusSummary = computed(() => {
+  const zh = currentLang.value !== 'en'
+  return zh
+    ? `最近一次健康检查 · ${serviceStatusRows.value.length} 个服务`
+    : `Latest health checks · ${serviceStatusRows.value.length} service${serviceStatusRows.value.length === 1 ? '' : 's'}`
+})
+
+const refreshServiceStatus = async () => {
   if (typeof document !== 'undefined' && document.hidden) return
   try {
-    const statuses = await fetchNsmcStatuses(apiIndex.value)
-    const status = statuses.find(item => String(item?.id) === String(serverId))
-    if (!status) return
-    server.value = {
-      ...server.value,
-      nsmc_session_state: status.state,
-      nsmc_session_checked_at: status.checked_at,
-      nsmc_session_account: status.account || ''
-    }
-    nsmcStatusNow.value = Date.now()
+    serviceStatuses.value = await fetchServiceStatuses(serverId, apiIndex.value)
+    serviceStatusNow.value = Date.now()
   } catch (e) {
-    console.log('[INFO] NSMC detail status refresh pending...', e)
+    console.log('[INFO] Service status refresh pending...', e)
   }
 }
 
@@ -1799,9 +1822,10 @@ const init = async () => {
   }, apiIndex.value)
 
   document.addEventListener('visibilitychange', handleVisibility)
-  nsmcStatusRefreshInterval = setInterval(refreshNsmcStatus, 60 * 1000)
-  nsmcStatusClockInterval = setInterval(() => {
-    nsmcStatusNow.value = Date.now()
+  await refreshServiceStatus()
+  serviceStatusRefreshInterval = setInterval(refreshServiceStatus, 60 * 1000)
+  serviceStatusClockInterval = setInterval(() => {
+    serviceStatusNow.value = Date.now()
   }, 30 * 1000)
 }
 
@@ -1818,8 +1842,8 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleVisibility)
   if (liveSocket) liveSocket.close()
-  if (nsmcStatusRefreshInterval) clearInterval(nsmcStatusRefreshInterval)
-  if (nsmcStatusClockInterval) clearInterval(nsmcStatusClockInterval)
+  if (serviceStatusRefreshInterval) clearInterval(serviceStatusRefreshInterval)
+  if (serviceStatusClockInterval) clearInterval(serviceStatusClockInterval)
   clearLatestReportReplayTimers()
   lastGpuSignature = ''
   safeDestroyCharts()

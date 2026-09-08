@@ -10,7 +10,7 @@ import {
   getWorkerLatestReportUpdates
 } from '../utils/latestReportCache.js';
 import { markFrontendRealtimeActive } from '../utils/realtimeBroadcastGate.js';
-import { attachNsmcStatuses } from './nsmcStatus.js';
+import { attachServiceStatuses } from './serviceStatus.js';
 import {
   DASHBOARD_LATENCY_WINDOW_HOURS,
   DASHBOARD_LATENCY_WINDOW_POINTS,
@@ -315,7 +315,7 @@ export async function handleServerAPI(request, env, sys) {
   
   const server = await getServerDetail(env.DB, id, isLoggedIn);
   if (!server) return createNotFoundResponse('Server not found');
-  await attachNsmcStatuses(env.DB, [server]);
+  await attachServiceStatuses(env.DB, [server]);
   
   const [latestMetrics, realtimeState] = await Promise.all([
     getLatestMetrics(env.DB, id, server),
@@ -350,7 +350,7 @@ export async function handleServersAPI(request, env, sys) {
   markFrontendRealtimeActive();
   
   const results = (await getAllServers(env.DB, isLoggedIn)).map(withoutPrivateServerFields);
-  await attachNsmcStatuses(env.DB, results);
+  await attachServiceStatuses(env.DB, results);
   const shouldIncludeLatencyHistory = sys.show_three_net_details === 'true';
   
   const serverIds = results.map(server => server.id).filter(Boolean);

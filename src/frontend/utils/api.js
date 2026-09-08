@@ -307,10 +307,11 @@ export const fetchServersAll = async () => {
   return mergedData
 }
 
-export const fetchNsmcStatuses = async (apiIndex = 0) => {
-  const result = await http.getByIndex('/api/nsmc-status', apiIndex, { autoRedirect: false })
-  if (result.error || !Array.isArray(result.data?.statuses)) return []
-  return result.data.statuses
+export const fetchServiceStatuses = async (serverId, apiIndex = 0) => {
+  const query = serverId ? `?id=${encodeURIComponent(serverId)}` : ''
+  const result = await http.getByIndex(`/api/service-status${query}`, apiIndex, { autoRedirect: false })
+  if (result.error || !Array.isArray(result.data?.services)) return []
+  return result.data.services
 }
 
 const createEmptyMergedData = () => ({

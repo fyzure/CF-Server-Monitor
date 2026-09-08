@@ -6,7 +6,11 @@ import { serveFrontend } from './handlers/frontend.js';
 import { handleUpdate, handleWebSocketUpgrade, handleUpdateWebSocketUpgrade } from './handlers/update.js';
 import { handleServerAPI, handleServersAPI } from './handlers/dashboard.js';
 import { handleTheme } from './handlers/theme.js';
-import { handleNsmcStatusAPI, handleNsmcStatusUpdate } from './handlers/nsmcStatus.js';
+import {
+  handleLegacyNsmcStatusUpdate,
+  handleServiceStatusAPI,
+  handleServiceStatusUpdate
+} from './handlers/serviceStatus.js';
 import { isValidThemeOptions, loadSettings, loadSiteSettings, loadAppearanceOptions, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, saveThemeOptions, setDebug, debug } from './utils/settings.js';
 import { checkAuth, simpleAuthResponse } from './middleware/auth.js';
 import { getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from './utils/cache.js';
@@ -263,7 +267,8 @@ export default {
 
     const routes = [
       { method: 'POST', path: '/update', handler: () => handleUpdate(request, env, ctx) },
-      { method: 'POST', path: '/update/nsmc-status', handler: () => handleNsmcStatusUpdate(request, env) },
+      { method: 'POST', path: '/update/service-status', handler: () => handleServiceStatusUpdate(request, env) },
+      { method: 'POST', path: '/update/nsmc-status', handler: () => handleLegacyNsmcStatusUpdate(request, env) },
       { method: 'GET', path: '/update', handler: () => handleUpdateWebSocketUpgrade(request, env) },
       { method: 'GET', path: '/__do/health', handler: async () => {
         if (!env.METRICS_BROADCASTER) {
@@ -379,9 +384,9 @@ export default {
         await ensureFullSettings();
         return handleServersAPI(request, env, sys);
       }},
-      { method: 'GET', path: '/api/nsmc-status', handler: async () => {
+      { method: 'GET', path: '/api/service-status', handler: async () => {
         await ensureSiteSettings();
-        return handleNsmcStatusAPI(request, env, sys);
+        return handleServiceStatusAPI(request, env, sys);
       }},
       { method: 'GET', path: '/api/ws', handler: async () => handleWebSocketUpgrade(request, env) },
 
