@@ -26,6 +26,26 @@ const MAX_STATUS_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_HISTORY_HOURS = 24;
 const MAX_HISTORY_HOURS = 30 * 24;
 const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+let historySchemaReady = false;
+
+async function ensureServiceStatusHistorySchema(db) {
+  if (historySchemaReady) return;
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS service_status_history (
+      server_id TEXT NOT NULL,
+      service TEXT NOT NULL,
+      state TEXT NOT NULL,
+      checked_at INTEGER NOT NULL,
+      message TEXT DEFAULT '',
+      PRIMARY KEY (server_id, service, checked_at)
+    )
+  `).run();
+  await db.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_service_status_history_server_time
+    ON service_status_history (server_id, checked_at)
+  `).run();
+  historySchemaReady = true;
+}
 
 function normalizeTimestamp(value) {
   const number = Number(value);
@@ -132,6 +152,7 @@ export async function getServiceStatuses(db, serverId = null) {
 }
 
 export async function getServiceStatusHistory(db, serverId, hours = DEFAULT_HISTORY_HOURS) {
+  await ensureServiceStatusHistorySchema(db);
   const safeHours = Math.max(1, Math.min(MAX_HISTORY_HOURS, Number(hours) || DEFAULT_HISTORY_HOURS));
   const since = Date.now() - safeHours * 60 * 60 * 1000;
   const result = await db.prepare(`
@@ -196,6 +217,8 @@ async function storeServiceStatus(env, data) {
 
   const server = await env.DB.prepare('SELECT id FROM servers WHERE id = ?').bind(id).first();
   if (!server) return createNotFoundResponse('Server not found');
+
+  await ensureServiceStatusHistorySchema(env.DB);
 
   const value = JSON.stringify({
     label: normalizeText(data?.label, MAX_LABEL_LENGTH) || service,
