@@ -122,6 +122,21 @@ export async function initDatabase(db) {
       await ensureHistoryIndex(db);
     }
 
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS service_status_history (
+        server_id TEXT NOT NULL,
+        service TEXT NOT NULL,
+        state TEXT NOT NULL,
+        checked_at INTEGER NOT NULL,
+        message TEXT DEFAULT '',
+        PRIMARY KEY (server_id, service, checked_at)
+      )
+    `).run();
+    await db.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_service_status_history_server_time
+      ON service_status_history (server_id, checked_at)
+    `).run();
+
     debug('✅ 数据库初始化完成');
     dbInitialized = true;
   } catch (e) {

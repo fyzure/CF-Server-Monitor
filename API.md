@@ -1111,14 +1111,20 @@ https://github.com/<owner>/<theme-repo>/tree/<commit-or-branch>[/theme-subdir]
 
 ### 2.8 `GET /api/service-status` - 读取服务状态
 
-读取当前可见服务器的服务状态。传 `id` 时只返回单台服务器：
+读取当前可见服务器的服务状态。传 `id` 时只返回单台服务器，并附带该服务的历史采样：
 
 ```http
-GET /api/service-status?id=<server-id>
+GET /api/service-status?id=<server-id>&hours=24
 ```
+
+- `hours` 默认 `24`
+- 最小 `1`
+- 最大 `720`（30 天）
+- 历史采样按时间从旧到新返回
 
 ```json
 {
+  "hours": 24,
   "services": [
     {
       "id": "<server-id>",
@@ -1126,12 +1132,18 @@ GET /api/service-status?id=<server-id>
       "label": "NSMC DataPortal",
       "state": "operational",
       "checked_at": 1788878825859,
-      "message": "Session valid"
+      "message": "Session valid",
+      "history": [
+        { "state": "operational", "checked_at": 1788877925859 },
+        { "state": "operational", "checked_at": 1788878825859 }
+      ]
     }
   ]
 }
 ```
 
+每次 `POST /update/service-status` 在更新 latest 状态的同时，会按
+`server_id + service + checked_at` 幂等追加一条历史采样。历史保留 30 天。
 前端可自行将超过预期检查周期的记录显示为 stale；服务端不会擅自改写上报状态。
 
 ***

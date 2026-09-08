@@ -4,6 +4,7 @@ import { Miniflare } from 'miniflare';
 
 import {
   attachServiceStatuses,
+  getServiceStatusHistory,
   getServiceStatuses,
   handleLegacyNsmcStatusUpdate,
   handleServiceStatusUpdate
@@ -20,6 +21,16 @@ function createMiniflare() {
 async function createTables(db) {
   await db.prepare('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)').run();
   await db.prepare('CREATE TABLE servers (id TEXT PRIMARY KEY)').run();
+  await db.prepare(`
+    CREATE TABLE service_status_history (
+      server_id TEXT NOT NULL,
+      service TEXT NOT NULL,
+      state TEXT NOT NULL,
+      checked_at INTEGER NOT NULL,
+      message TEXT DEFAULT '',
+      PRIMARY KEY (server_id, service, checked_at)
+    )
+  `).run();
   await db.prepare("INSERT INTO servers (id) VALUES ('hpc-c2ln1')").run();
 }
 
@@ -66,6 +77,12 @@ test('generic service status stores a compact non-sensitive status record', asyn
 
     const row = await db.prepare("SELECT value FROM settings WHERE key = 'service_status:hpc-c2ln1:nsmc'").first();
     assert.equal(row.value.includes('monitor-secret'), false);
+
+    const history = await getServiceStatusHistory(db, 'hpc-c2ln1', 24);
+    assert.deepEqual(history.get('nsmc'), [{
+      state: 'operational',
+      checked_at: checkedAt
+    }]);
   } finally {
     await miniflare.dispose();
   }
@@ -96,6 +113,8 @@ test('legacy NSMC update maps into the generic service model', async () => {
     const statuses = await getServiceStatuses(db, 'hpc-c2ln1');
     assert.equal(statuses[0].state, 'operational');
     assert.equal(statuses[0].label, 'NSMC DataPortal');
+    const history = await getServiceStatusHistory(db, 'hpc-c2ln1', 24);
+    assert.equal(history.get('nsmc').length, 1);
   } finally {
     await miniflare.dispose();
   }

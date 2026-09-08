@@ -23,6 +23,9 @@ const MAX_LABEL_LENGTH = 80;
 const MAX_MESSAGE_LENGTH = 240;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAX_STATUS_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_HISTORY_HOURS = 24;
+const MAX_HISTORY_HOURS = 30 * 24;
+const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 function normalizeTimestamp(value) {
   const number = Number(value);
@@ -128,6 +131,29 @@ export async function getServiceStatuses(db, serverId = null) {
   ));
 }
 
+export async function getServiceStatusHistory(db, serverId, hours = DEFAULT_HISTORY_HOURS) {
+  const safeHours = Math.max(1, Math.min(MAX_HISTORY_HOURS, Number(hours) || DEFAULT_HISTORY_HOURS));
+  const since = Date.now() - safeHours * 60 * 60 * 1000;
+  const result = await db.prepare(`
+    SELECT service, state, checked_at
+    FROM service_status_history
+    WHERE server_id = ? AND checked_at >= ?
+    ORDER BY checked_at ASC
+  `).bind(serverId, since).all();
+
+  const byService = new Map();
+  for (const row of result?.results || []) {
+    const service = normalizeServiceId(row?.service);
+    const state = String(row?.state || '').trim().toLowerCase();
+    const checkedAt = normalizeTimestamp(row?.checked_at);
+    if (!service || !ALLOWED_STATES.has(state) || !checkedAt) continue;
+    const samples = byService.get(service) || [];
+    samples.push({ state, checked_at: checkedAt });
+    byService.set(service, samples);
+  }
+  return byService;
+}
+
 export async function attachServiceStatuses(db, servers) {
   if (!Array.isArray(servers) || servers.length === 0) return servers;
   const allStatuses = await getServiceStatuses(db);
@@ -178,9 +204,26 @@ async function storeServiceStatus(env, data) {
     message: normalizeText(data?.message, MAX_MESSAGE_LENGTH),
     updated_at: now
   });
-  await env.DB.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  ).bind(settingKey(id, service), value).run();
+  await env.DB.batch([
+    env.DB.prepare(
+      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+    ).bind(settingKey(id, service), value),
+    env.DB.prepare(`
+      INSERT OR IGNORE INTO service_status_history
+        (server_id, service, state, checked_at, message)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(
+      id,
+      service,
+      state,
+      checkedAt,
+      normalizeText(data?.message, MAX_MESSAGE_LENGTH)
+    ),
+    env.DB.prepare(`
+      DELETE FROM service_status_history
+      WHERE server_id = ? AND service = ? AND checked_at < ?
+    `).bind(id, service, now - HISTORY_RETENTION_MS)
+  ]);
 
   return createSuccessResponse({ ok: true });
 }
@@ -240,6 +283,10 @@ export async function handleServiceStatusAPI(request, env, sys) {
 
   const url = new URL(request.url);
   const requestedId = String(url.searchParams.get('id') || '').trim();
+  const requestedHours = Math.max(
+    1,
+    Math.min(MAX_HISTORY_HOURS, Number(url.searchParams.get('hours')) || DEFAULT_HISTORY_HOURS)
+  );
   const servers = await getAllServers(env.DB, isLoggedIn);
   const visibleIds = new Set((servers || []).map(server => String(server.id)));
   if (requestedId && !visibleIds.has(requestedId)) {
@@ -247,7 +294,16 @@ export async function handleServiceStatusAPI(request, env, sys) {
   }
 
   const services = await getServiceStatuses(env.DB, requestedId || null);
+  const historyByService = requestedId
+    ? await getServiceStatusHistory(env.DB, requestedId, requestedHours)
+    : new Map();
   return createSuccessResponse({
-    services: services.filter(status => visibleIds.has(status.id))
+    hours: requestedHours,
+    services: services
+      .filter(status => visibleIds.has(status.id))
+      .map(status => ({
+        ...status,
+        history: requestedId ? (historyByService.get(status.service) || []) : []
+      }))
   });
 }
