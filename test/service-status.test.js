@@ -120,6 +120,48 @@ test('legacy NSMC update maps into the generic service model', async () => {
   }
 });
 
+test('service status history supports incremental reads', async () => {
+  const miniflare = createMiniflare();
+  try {
+    const db = await miniflare.getD1Database('DB');
+    await createTables(db);
+    const firstCheckedAt = Date.now() - 60_000;
+    const secondCheckedAt = Date.now();
+
+    for (const checkedAt of [firstCheckedAt, secondCheckedAt]) {
+      const request = new Request('https://monitor.example/update/service-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: 'hpc-c2ln1',
+          secret: 'monitor-secret',
+          service: 'nsmc',
+          label: 'NSMC DataPortal',
+          state: 'operational',
+          checked_at: checkedAt,
+          message: 'Session valid'
+        })
+      });
+      const response = await handleServiceStatusUpdate(request, {
+        DB: db,
+        API_SECRET: 'monitor-secret'
+      });
+      assert.equal(response.status, 200);
+    }
+
+    const fullHistory = await getServiceStatusHistory(db, 'hpc-c2ln1', 24);
+    assert.equal(fullHistory.get('nsmc').length, 2);
+
+    const incremental = await getServiceStatusHistory(db, 'hpc-c2ln1', 24, firstCheckedAt);
+    assert.deepEqual(incremental.get('nsmc'), [{
+      state: 'operational',
+      checked_at: secondCheckedAt
+    }]);
+  } finally {
+    await miniflare.dispose();
+  }
+});
+
 test('generic service status rejects an invalid monitor secret', async () => {
   const miniflare = createMiniflare();
   try {

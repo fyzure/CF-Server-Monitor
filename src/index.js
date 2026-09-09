@@ -7,6 +7,7 @@ import { handleUpdate, handleWebSocketUpgrade, handleUpdateWebSocketUpgrade } fr
 import { handleServerAPI, handleServersAPI } from './handlers/dashboard.js';
 import { handleTheme } from './handlers/theme.js';
 import {
+  cleanupServiceStatusHistory,
   handleLegacyNsmcStatusUpdate,
   handleServiceStatusAPI,
   handleServiceStatusUpdate
@@ -479,6 +480,7 @@ export default {
       if (day === 0 && hour === 0) {
         debug('[Cron] 开始执行每周数据清理任务（表轮换）');
         await weeklyCleanup(env.DB);
+        await cleanupServiceStatusHistory(env.DB);
         debug('[Cron] 每周数据清理任务完成');
       }
       debug('[Cron] 检查是否到达服务器到期检测时间');
@@ -487,6 +489,7 @@ export default {
       if (cron === '0 0 * * 0') {
         debug('[Cron DEBUG] 开始执行每周数据清理任务（表轮换）');
         await weeklyCleanup(env.DB);
+        await cleanupServiceStatusHistory(env.DB);
         debug('[Cron DEBUG] 每周数据清理任务完成');
       } else if (cron === '0 12 * * *') {
         debug('[Cron DEBUG] 开始执行服务器到期检测');

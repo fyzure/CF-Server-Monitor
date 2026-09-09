@@ -1111,7 +1111,7 @@ https://github.com/<owner>/<theme-repo>/tree/<commit-or-branch>[/theme-subdir]
 
 ### 2.8 `GET /api/service-status` - 读取服务状态
 
-读取当前可见服务器的服务状态。传 `id` 时只返回单台服务器，并附带该服务的历史采样：
+读取当前可见服务器的服务状态。传 `id` 时只返回单台服务器；首次打开详情页时用 `hours` 读取历史采样：
 
 ```http
 GET /api/service-status?id=<server-id>&hours=24
@@ -1142,8 +1142,20 @@ GET /api/service-status?id=<server-id>&hours=24
 }
 ```
 
+后续刷新不要重复拉整段历史，使用 `since` 只读取新增样本：
+
+```http
+GET /api/service-status?id=<server-id>&since=<last-checked-at-ms>
+```
+
+- `since` 只返回 `checked_at > since` 的历史采样
+- 增量查询走 `(server_id, checked_at)` 索引
+- 完整历史查询复用与 VPS 历史相同的按时间范围缓存策略
+- 页面隐藏时应停止增量请求，恢复可见时补一次
+
 每次 `POST /update/service-status` 在更新 latest 状态的同时，会按
 `server_id + service + checked_at` 幂等追加一条历史采样。历史保留 30 天。
+过期历史与 VPS 历史一样由每周清理任务统一删除，不会在每次状态上报时执行 DELETE。
 前端可自行将超过预期检查周期的记录显示为 stale；服务端不会擅自改写上报状态。
 
 ***

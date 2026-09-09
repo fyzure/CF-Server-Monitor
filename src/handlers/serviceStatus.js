@@ -1,5 +1,5 @@
 import { checkAuth, simpleAuthResponse } from '../middleware/auth.js';
-import { getAllServers } from '../utils/cache.js';
+import { getAllServers, getCacheDuration } from '../utils/cache.js';
 import {
   createBadRequestResponse,
   createNotFoundResponse,
@@ -26,10 +26,12 @@ const MAX_STATUS_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_HISTORY_HOURS = 24;
 const MAX_HISTORY_HOURS = 30 * 24;
 const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-let historySchemaReady = false;
+const MAX_INCREMENTAL_SAMPLES = 2048;
+const historySchemaReady = new WeakSet();
+const serviceStatusHistoryCaches = new WeakMap();
 
 async function ensureServiceStatusHistorySchema(db) {
-  if (historySchemaReady) return;
+  if (historySchemaReady.has(db)) return;
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS service_status_history (
       server_id TEXT NOT NULL,
@@ -44,7 +46,31 @@ async function ensureServiceStatusHistorySchema(db) {
     CREATE INDEX IF NOT EXISTS idx_service_status_history_server_time
     ON service_status_history (server_id, checked_at)
   `).run();
-  historySchemaReady = true;
+  historySchemaReady.add(db);
+}
+
+function serviceStatusHistoryCacheKey(serverId, hours) {
+  return `${serverId}:${hours}`;
+}
+
+function getServiceStatusHistoryCache(db) {
+  let cache = serviceStatusHistoryCaches.get(db);
+  if (!cache) {
+    cache = new Map();
+    serviceStatusHistoryCaches.set(db, cache);
+  }
+  return cache;
+}
+
+function clearServiceStatusHistoryCache(db, serverId = null) {
+  const cache = getServiceStatusHistoryCache(db);
+  if (!serverId) {
+    cache.clear();
+    return;
+  }
+  for (const key of cache.keys()) {
+    if (key.startsWith(`${serverId}:`)) cache.delete(key);
+  }
 }
 
 function normalizeTimestamp(value) {
@@ -151,16 +177,42 @@ export async function getServiceStatuses(db, serverId = null) {
   ));
 }
 
-export async function getServiceStatusHistory(db, serverId, hours = DEFAULT_HISTORY_HOURS) {
+export async function getServiceStatusHistory(
+  db,
+  serverId,
+  hours = DEFAULT_HISTORY_HOURS,
+  since = null
+) {
   await ensureServiceStatusHistorySchema(db);
   const safeHours = Math.max(1, Math.min(MAX_HISTORY_HOURS, Number(hours) || DEFAULT_HISTORY_HOURS));
-  const since = Date.now() - safeHours * 60 * 60 * 1000;
-  const result = await db.prepare(`
-    SELECT service, state, checked_at
-    FROM service_status_history
-    WHERE server_id = ? AND checked_at >= ?
-    ORDER BY checked_at ASC
-  `).bind(serverId, since).all();
+  const normalizedSince = normalizeTimestamp(since);
+  let result;
+
+  if (normalizedSince) {
+    result = await db.prepare(`
+      SELECT service, state, checked_at
+      FROM service_status_history
+      WHERE server_id = ? AND checked_at > ?
+      ORDER BY checked_at ASC
+      LIMIT ?
+    `).bind(serverId, normalizedSince, MAX_INCREMENTAL_SAMPLES).all();
+  } else {
+    const cacheKey = serviceStatusHistoryCacheKey(serverId, safeHours);
+    const historyCache = getServiceStatusHistoryCache(db);
+    const cached = historyCache.get(cacheKey);
+    const cacheDuration = getCacheDuration(safeHours);
+    if (cached && Date.now() - cached.timestamp < cacheDuration) {
+      return cached.data;
+    }
+
+    const cutoff = Date.now() - safeHours * 60 * 60 * 1000;
+    result = await db.prepare(`
+      SELECT service, state, checked_at
+      FROM service_status_history
+      WHERE server_id = ? AND checked_at >= ?
+      ORDER BY checked_at ASC
+    `).bind(serverId, cutoff).all();
+  }
 
   const byService = new Map();
   for (const row of result?.results || []) {
@@ -172,7 +224,23 @@ export async function getServiceStatusHistory(db, serverId, hours = DEFAULT_HIST
     samples.push({ state, checked_at: checkedAt });
     byService.set(service, samples);
   }
+  if (!normalizedSince) {
+    getServiceStatusHistoryCache(db).set(serviceStatusHistoryCacheKey(serverId, safeHours), {
+      data: byService,
+      timestamp: Date.now()
+    });
+  }
   return byService;
+}
+
+export async function cleanupServiceStatusHistory(db, now = Date.now()) {
+  await ensureServiceStatusHistorySchema(db);
+  const result = await db.prepare(`
+    DELETE FROM service_status_history
+    WHERE checked_at < ?
+  `).bind(now - HISTORY_RETENTION_MS).run();
+  clearServiceStatusHistoryCache(db);
+  return result;
 }
 
 export async function attachServiceStatuses(db, servers) {
@@ -241,12 +309,9 @@ async function storeServiceStatus(env, data) {
       state,
       checkedAt,
       normalizeText(data?.message, MAX_MESSAGE_LENGTH)
-    ),
-    env.DB.prepare(`
-      DELETE FROM service_status_history
-      WHERE server_id = ? AND service = ? AND checked_at < ?
-    `).bind(id, service, now - HISTORY_RETENTION_MS)
+    )
   ]);
+  clearServiceStatusHistoryCache(env.DB, id);
 
   return createSuccessResponse({ ok: true });
 }
@@ -310,6 +375,7 @@ export async function handleServiceStatusAPI(request, env, sys) {
     1,
     Math.min(MAX_HISTORY_HOURS, Number(url.searchParams.get('hours')) || DEFAULT_HISTORY_HOURS)
   );
+  const requestedSince = normalizeTimestamp(url.searchParams.get('since'));
   const servers = await getAllServers(env.DB, isLoggedIn);
   const visibleIds = new Set((servers || []).map(server => String(server.id)));
   if (requestedId && !visibleIds.has(requestedId)) {
@@ -318,10 +384,11 @@ export async function handleServiceStatusAPI(request, env, sys) {
 
   const services = await getServiceStatuses(env.DB, requestedId || null);
   const historyByService = requestedId
-    ? await getServiceStatusHistory(env.DB, requestedId, requestedHours)
+    ? await getServiceStatusHistory(env.DB, requestedId, requestedHours, requestedSince)
     : new Map();
   return createSuccessResponse({
     hours: requestedHours,
+    since: requestedSince || null,
     services: services
       .filter(status => visibleIds.has(status.id))
       .map(status => ({
