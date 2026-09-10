@@ -1037,6 +1037,14 @@ ws.onmessage = (ev) => {
 };
 ```
 
+实时上报频率会根据前端订阅层级自适应：
+
+- 没有前端订阅时，Agent 回到服务器配置的 `report_interval`（通常 60/180 秒）。
+- `subscribe=all` 的首页概览使用 10 秒摘要频率，避免首页常驻把所有 Agent 拉到高频上报。
+- `subscribe=<serverId>` 的单机详情页使用该服务器的 `wss_report_interval`（当前通常为 2 秒）。
+
+因此 `wss_report_interval` 表示“详情页实时频率”，不是 24 小时持续上报频率。
+
 ***
 
 ### 2.6 `GET /theme` - 获取主题商店数据
@@ -1111,7 +1119,7 @@ https://github.com/<owner>/<theme-repo>/tree/<commit-or-branch>[/theme-subdir]
 
 ### 2.8 `GET /api/service-status` - 读取服务状态
 
-读取当前可见服务器的服务状态。传 `id` 时只返回单台服务器；首次打开详情页时用 `hours` 读取历史采样：
+读取当前可见服务器的服务状态。传 `id` 时只返回单台服务器；需要历史时可用 `hours` 读取历史采样：
 
 ```http
 GET /api/service-status?id=<server-id>&hours=24
@@ -1120,6 +1128,7 @@ GET /api/service-status?id=<server-id>&hours=24
 - `hours` 默认 `24`
 - 最小 `1`
 - 最大 `720`（30 天）
+- `history=0`：只返回最新状态，跳过历史查询；适合详情页的周期刷新
 - 历史采样按时间从旧到新返回
 
 ```json

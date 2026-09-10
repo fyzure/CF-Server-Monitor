@@ -376,6 +376,7 @@ export async function handleServiceStatusAPI(request, env, sys) {
     Math.min(MAX_HISTORY_HOURS, Number(url.searchParams.get('hours')) || DEFAULT_HISTORY_HOURS)
   );
   const requestedSince = normalizeTimestamp(url.searchParams.get('since'));
+  const includeHistory = url.searchParams.get('history') !== '0';
   const servers = await getAllServers(env.DB, isLoggedIn);
   const visibleIds = new Set((servers || []).map(server => String(server.id)));
   if (requestedId && !visibleIds.has(requestedId)) {
@@ -383,7 +384,7 @@ export async function handleServiceStatusAPI(request, env, sys) {
   }
 
   const services = await getServiceStatuses(env.DB, requestedId || null);
-  const historyByService = requestedId
+  const historyByService = requestedId && includeHistory
     ? await getServiceStatusHistory(env.DB, requestedId, requestedHours, requestedSince)
     : new Map();
   return createSuccessResponse({
@@ -393,7 +394,7 @@ export async function handleServiceStatusAPI(request, env, sys) {
       .filter(status => visibleIds.has(status.id))
       .map(status => ({
         ...status,
-        history: requestedId ? (historyByService.get(status.service) || []) : []
+        history: requestedId && includeHistory ? (historyByService.get(status.service) || []) : []
       }))
   });
 }

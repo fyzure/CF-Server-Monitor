@@ -374,6 +374,117 @@ test('WSS agent ack suggests configured realtime or idle report interval', () =>
     }),
     4000
   );
+  assert.equal(
+    broadcaster._getAgentNextWssReportAfterMs(2000, 60000, {
+      dashboardActive: true,
+      detailActive: false,
+      frontendActive: true,
+      resourceAlertActive: false,
+      realtimeActive: true
+    }),
+    10000
+  );
+  assert.equal(
+    broadcaster._getAgentNextWssReportAfterMs(2000, 60000, {
+      dashboardActive: true,
+      detailActive: true,
+      frontendActive: true,
+      resourceAlertActive: false,
+      realtimeActive: true
+    }),
+    2000
+  );
+});
+
+test('frontend realtime state distinguishes dashboard and server detail subscriptions', () => {
+  const dashboardWs = {
+    deserializeAttachment() {
+      return {
+        scope: 'all',
+        serverIds: ['server-1', 'server-2']
+      };
+    }
+  };
+  const detailWs = {
+    deserializeAttachment() {
+      return {
+        scope: 'server-2',
+        serverIds: []
+      };
+    }
+  };
+  const broadcaster = makeBroadcaster([dashboardWs, detailWs]);
+
+  assert.deepEqual(broadcaster._getFrontendRealtimeState('server-1'), {
+    dashboardActive: true,
+    detailActive: false,
+    frontendActive: true
+  });
+  assert.deepEqual(broadcaster._getFrontendRealtimeState('server-2'), {
+    dashboardActive: true,
+    detailActive: true,
+    frontendActive: true
+  });
+  assert.deepEqual(broadcaster._getFrontendRealtimeState('server-3'), {
+    dashboardActive: false,
+    detailActive: false,
+    frontendActive: false
+  });
+});
+
+test('frontend realtime hints keep dashboard at summary cadence and detail at realtime cadence', async () => {
+  const sent = new Map();
+  const makeAgent = (serverId) => ({
+    deserializeAttachment() {
+      return {
+        kind: 'agent-report',
+        authenticated: true,
+        serverId,
+        reportIntervalMs: 60000,
+        wssReportIntervalMs: 2000
+      };
+    },
+    send(message) {
+      sent.set(serverId, JSON.parse(message));
+    }
+  });
+  const dashboardWs = {
+    deserializeAttachment() {
+      return { scope: 'all', serverIds: ['server-1', 'server-2'] };
+    }
+  };
+  const detailWs = {
+    deserializeAttachment() {
+      return { scope: 'server-2', serverIds: [] };
+    }
+  };
+  const broadcaster = makeBroadcaster([
+    makeAgent('server-1'),
+    makeAgent('server-2'),
+    dashboardWs,
+    detailWs
+  ]);
+  broadcaster._getAgentHintReportIntervalMs = async () => 2000;
+
+  const hinted = await broadcaster._hintAgentRealtimeIntervals();
+
+  assert.equal(hinted, 2);
+  assert.equal(sent.get('server-1').nextWssReportAfterMs, 10000);
+  assert.equal(sent.get('server-2').nextWssReportAfterMs, 2000);
+});
+
+test('frontend subscription stats separate dashboard and detail sockets', () => {
+  const broadcaster = makeBroadcaster([
+    { deserializeAttachment() { return { scope: 'all', serverIds: ['server-1'] }; } },
+    { deserializeAttachment() { return { scope: 'server-1', serverIds: [] }; } },
+    { deserializeAttachment() { return { scope: 'server-2', serverIds: [] }; } }
+  ]);
+
+  assert.deepEqual(broadcaster._getFrontendSubscriptionStats(), {
+    dashboardSubscribers: 1,
+    detailSubscribers: 2,
+    subscribers: 3
+  });
 });
 
 test('frontend realtime hint pushes active interval to connected agents', async () => {

@@ -38,6 +38,7 @@ import {
   toBroadcastSamples
 } from '../handlers/update.js';
 import {
+  AGENT_DASHBOARD_WSS_REPORT_INTERVAL_MS,
   AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS,
   AGENT_MIN_IDLE_WSS_REPORT_INTERVAL_MS,
   AGENT_SERVER_DETAIL_TTL_MS,
@@ -428,6 +429,21 @@ export class MetricsBroadcaster {
 
   _getFrontendSubscriberCount() {
     return this._getFrontendWebSockets().length;
+  }
+
+  _getFrontendSubscriptionStats() {
+    let dashboardSubscribers = 0;
+    let detailSubscribers = 0;
+    for (const ws of this._getFrontendWebSockets()) {
+      const attachment = ws.deserializeAttachment() || {};
+      if (attachment.scope === 'all') dashboardSubscribers += 1;
+      else if (this._isValidServerId(String(attachment.scope || ''))) detailSubscribers += 1;
+    }
+    return {
+      dashboardSubscribers,
+      detailSubscribers,
+      subscribers: dashboardSubscribers + detailSubscribers
+    };
   }
 
   _getAgentReportWebSockets() {
@@ -1007,27 +1023,65 @@ export class MetricsBroadcaster {
     this._broadcastBatch(normalizedUpdates, reportTs);
   }
 
-  _getAgentRealtimeState(now = Date.now()) {
-    const frontendActive = this._getFrontendSubscriberCount() > 0;
+  _getFrontendRealtimeState(serverId) {
+    const normalizedServerId = String(serverId || '');
+    let dashboardActive = false;
+    let detailActive = false;
+
+    for (const ws of this._getFrontendWebSockets()) {
+      const attachment = ws.deserializeAttachment() || {};
+      if (attachment.scope === normalizedServerId && normalizedServerId) {
+        detailActive = true;
+      } else if (
+        attachment.scope === 'all' &&
+        Array.isArray(attachment.serverIds) &&
+        attachment.serverIds.includes(normalizedServerId)
+      ) {
+        dashboardActive = true;
+      }
+      if (dashboardActive && detailActive) break;
+    }
+
+    return {
+      dashboardActive,
+      detailActive,
+      frontendActive: dashboardActive || detailActive
+    };
+  }
+
+  _getAgentRealtimeState(now = Date.now(), serverId = '') {
+    const frontend = this._getFrontendRealtimeState(serverId);
     const resourceAlertActive = this._shouldCacheResourceAlertSamples(now);
     return {
-      frontendActive,
+      ...frontend,
       resourceAlertActive,
-      realtimeActive: frontendActive || resourceAlertActive
+      realtimeActive: frontend.frontendActive || resourceAlertActive
     };
   }
 
   _normalizeRealtimeState(realtimeState) {
     if (realtimeState && typeof realtimeState === 'object') {
+      const hasTieredState =
+        Object.prototype.hasOwnProperty.call(realtimeState, 'dashboardActive') ||
+        Object.prototype.hasOwnProperty.call(realtimeState, 'detailActive');
+      const dashboardActive = realtimeState.dashboardActive === true;
+      const detailActive = hasTieredState
+        ? realtimeState.detailActive === true
+        : realtimeState.frontendActive === true;
+      const frontendActive = dashboardActive || detailActive || realtimeState.frontendActive === true;
       return {
-        frontendActive: realtimeState.frontendActive === true,
+        dashboardActive,
+        detailActive,
+        frontendActive,
         resourceAlertActive: realtimeState.resourceAlertActive === true,
         realtimeActive: realtimeState.realtimeActive === true ||
-          realtimeState.frontendActive === true ||
+          frontendActive ||
           realtimeState.resourceAlertActive === true
       };
     }
     return {
+      dashboardActive: false,
+      detailActive: realtimeState === true,
       frontendActive: realtimeState === true,
       resourceAlertActive: false,
       realtimeActive: realtimeState === true
@@ -1044,9 +1098,14 @@ export class MetricsBroadcaster {
       AGENT_MIN_IDLE_WSS_REPORT_INTERVAL_MS,
       Number(reportIntervalMs) || AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS
     );
-    return state.frontendActive
-      ? normalizedWssReportIntervalMs
-      : normalizedReportIntervalMs;
+    if (state.detailActive) return normalizedWssReportIntervalMs;
+    if (state.dashboardActive) {
+      return Math.max(
+        AGENT_DASHBOARD_WSS_REPORT_INTERVAL_MS,
+        normalizedWssReportIntervalMs
+      );
+    }
+    return normalizedReportIntervalMs;
   }
 
   async _getAgentHintReportIntervalMs(attachment) {
@@ -1072,8 +1131,6 @@ export class MetricsBroadcaster {
 
   async _hintAgentRealtimeIntervals(realtimeState = null) {
     const now = Date.now();
-    const state = realtimeState || this._getAgentRealtimeState(now);
-    if (!state.frontendActive) return 0;
     if (now - this.lastAgentRealtimeHintAt < 1000) return 0;
     this.lastAgentRealtimeHintAt = now;
 
@@ -1087,6 +1144,11 @@ export class MetricsBroadcaster {
       ) {
         continue;
       }
+
+      const state = realtimeState
+        ? this._normalizeRealtimeState(realtimeState)
+        : this._getAgentRealtimeState(now, attachment.serverId);
+      if (!state.frontendActive) continue;
 
       const wssReportIntervalMs = await this._getAgentHintReportIntervalMs(attachment);
       const nextWssReportAfterMs = this._getAgentNextWssReportAfterMs(
@@ -1255,7 +1317,7 @@ export class MetricsBroadcaster {
       serverId: context.serverId,
       samples: broadcastSamples
     }];
-    const realtimeState = this._getAgentRealtimeState(reportTs);
+    const realtimeState = this._getAgentRealtimeState(reportTs, context.serverId);
     if (realtimeState.realtimeActive) {
       await this._ingestRealtimeUpdates(normalizedUpdates, reportTs);
     } else {
@@ -1589,7 +1651,7 @@ export class MetricsBroadcaster {
 
     // ── 3) 健康检查 ────────────────────────────────────
     if (method === 'GET' && (path === '/health' || path.endsWith('/health'))) {
-      const subscribers = this._getFrontendSubscriberCount();
+      const subscriptionStats = this._getFrontendSubscriptionStats();
       const sockets = this.state.getWebSockets();
       const agentSockets = sockets.filter(ws => {
         const attachment = ws.deserializeAttachment();
@@ -1597,7 +1659,7 @@ export class MetricsBroadcaster {
       }).length;
       return new Response(JSON.stringify({
         ok: true,
-        subscribers,
+        ...subscriptionStats,
         sockets: sockets.length,
         agentSockets,
         agentWebSocketMode: 'hibernation'
@@ -1993,11 +2055,7 @@ export class MetricsBroadcaster {
           }));
         } catch (_) {}
         try {
-          await this._hintAgentRealtimeIntervals({
-            frontendActive: true,
-            resourceAlertActive: this._shouldCacheResourceAlertSamples(),
-            realtimeActive: true
-          });
+          await this._hintAgentRealtimeIntervals();
         } catch (e) {
           console.warn('[ws] Failed to hint agent realtime interval:', e?.message || e);
         }

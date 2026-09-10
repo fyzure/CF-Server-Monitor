@@ -308,7 +308,7 @@ export const fetchServersAll = async () => {
 }
 
 export const fetchServiceStatuses = async (serverId, apiIndex = 0) => {
-  const query = serverId ? `?id=${encodeURIComponent(serverId)}` : ''
+  const query = serverId ? `?id=${encodeURIComponent(serverId)}&history=0` : ''
   const result = await http.getByIndex(`/api/service-status${query}`, apiIndex, { autoRedirect: false })
   if (result.error || !Array.isArray(result.data?.services)) return []
   return result.data.services

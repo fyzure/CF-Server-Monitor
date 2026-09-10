@@ -1823,7 +1823,7 @@ const init = async () => {
 
   document.addEventListener('visibilitychange', handleVisibility)
   await refreshServiceStatus()
-  serviceStatusRefreshInterval = setInterval(refreshServiceStatus, 60 * 1000)
+  serviceStatusRefreshInterval = setInterval(refreshServiceStatus, 5 * 60 * 1000)
   serviceStatusClockInterval = setInterval(() => {
     serviceStatusNow.value = Date.now()
   }, 30 * 1000)
