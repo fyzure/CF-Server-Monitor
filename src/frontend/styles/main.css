@@ -777,6 +777,18 @@ body::before {
     letter-spacing: 0.5px;
 }
 
+.tab-btn::before {
+    content: '';
+    display: inline-block;
+    width: 0;
+    height: 0;
+    margin-right: 7px;
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    border-left: 5px solid currentColor;
+    vertical-align: -1px;
+}
+
 .tab-btn:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
@@ -2410,6 +2422,57 @@ body::before {
     gap: 8px;
 }
 
+.donation-content {
+    display: flex;
+    align-items: center;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.donation-copy {
+    width: 100%;
+    max-width: 720px;
+    color: var(--text-primary);
+    font-size: 13px;
+    line-height: 1.8;
+    text-align: center;
+}
+
+.donation-copy p {
+    margin: 0 0 12px;
+}
+
+.donation-copy p:last-child {
+    margin-bottom: 0;
+}
+
+.donation-token {
+    color: var(--accent-yellow);
+    font-weight: 600;
+}
+
+.donation-qr-card {
+    width: min(247px, 100%);
+    padding: 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    text-align: center;
+}
+
+.donation-qr {
+    display: block;
+    width: 215px;
+    max-width: 100%;
+    height: auto;
+    margin: 0 auto 10px;
+}
+
+.donation-qr-caption {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
 .section-subtitle {
     color: var(--text-secondary);
     font-size: 12px;
@@ -3238,6 +3301,7 @@ body::before {
 
 .chart-title {
     font-size: 13px;
+    min-width: 80px;
     font-weight: 600;
     color: var(--text-primary);
     display: flex;
@@ -3468,13 +3532,14 @@ body::before {
 }
 
 .config-list {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
     margin-bottom: 16px;
     border: 1px solid var(--border-color);
     border-radius: 4px;
     overflow: hidden;
-    background: var(--bg-card);
+    background: var(--border-color);
 }
 
 .config-row {
@@ -3483,11 +3548,7 @@ body::before {
     justify-content: space-between;
     gap: 16px;
     padding: 10px 12px;
-    border-bottom: 1px solid var(--border-color);
-}
-
-.config-row:last-child {
-    border-bottom: none;
+    background: var(--bg-card);
 }
 
 .config-label {
@@ -4158,8 +4219,8 @@ body.server-row-drag-active * {
 .ping-indicator {
     display: flex;
     flex-wrap: wrap;
-    gap: 20px;
-    font-size: 11px;
+    gap: 5px 10px;
+    font-size: 10px;
     font-weight: 500;
 }
 
@@ -4177,6 +4238,22 @@ body.server-row-drag-active * {
 
 .ping-bd {
     color: var(--accent-purple);
+}
+
+.ping-node-1 {
+    color: #ff7b72;
+}
+
+.ping-node-2 {
+    color: #79c0ff;
+}
+
+.ping-node-3 {
+    color: #7ee787;
+}
+
+.ping-node-4 {
+    color: #ffa657;
 }
 
 .modal-body-content {
@@ -5011,8 +5088,18 @@ body.mikus-theme .mikus-stats-mascot-img {
         display: none;
     }
 
+    .tabs{
+        width: 100%;
+        justify-content: space-between;
+    }
+
     .btn, .tab-btn{
-        padding: 8px;
+        padding: 8px 5px;
+        font-size: 11px;
+    }
+    
+    .tab-btn::before{
+        margin-right: 4px;
     }
 
     .terminal-dots{
@@ -5163,6 +5250,10 @@ body.mikus-theme .mikus-stats-mascot-img {
         gap: 6px;
     }
 
+    .config-list {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
     .config-value {
         text-align: left;
     }
@@ -5173,6 +5264,10 @@ body.mikus-theme .mikus-stats-mascot-img {
 
     .tab-content .text-right .btn {
         width: 100%;
+    }
+
+    .donation-content {
+        gap: 16px;
     }
 
     .view-panel {

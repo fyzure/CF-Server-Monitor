@@ -91,8 +91,29 @@ jobs:
         run: npx wrangler deploy
 
       - name: Verify production
+        shell: bash
         run: |
+          set -euo pipefail
+          expected_version=$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync('version.json', 'utf8')).workers)")
+
           curl --fail --silent --show-error \
             --retry 6 --retry-delay 5 --retry-all-errors \
-            https://monitor.fyzure.fyi/api/status \
-            >/dev/null
+            https://monitor.fyzure.fyi/api/config \
+            -o /tmp/cfsm-config.json
+          jq -e --arg expected_version "$expected_version" '
+            type == "object" and
+            (.version == $expected_version) and
+            (.is_public | type == "boolean")
+          ' /tmp/cfsm-config.json >/dev/null
+
+          curl --fail --silent --show-error \
+            --retry 6 --retry-delay 5 --retry-all-errors \
+            https://monitor.fyzure.fyi/api/servers \
+            -o /tmp/cfsm-servers.json
+          jq -e '
+            type == "object" and
+            (.servers | type == "array") and
+            (.stats | type == "object") and
+            (.stats.total | type == "number") and
+            (.stats.online | type == "number")
+          ' /tmp/cfsm-servers.json >/dev/null
