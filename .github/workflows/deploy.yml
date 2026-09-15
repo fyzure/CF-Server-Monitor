@@ -96,15 +96,29 @@ jobs:
           set -euo pipefail
           expected_version=$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync('version.json', 'utf8')).workers)")
 
-          curl --fail --silent --show-error \
-            --retry 6 --retry-delay 5 --retry-all-errors \
-            https://monitor.fyzure.fyi/api/config \
-            -o /tmp/cfsm-config.json
-          jq -e --arg expected_version "$expected_version" '
-            type == "object" and
-            (.version == $expected_version) and
-            (.is_public | type == "boolean")
-          ' /tmp/cfsm-config.json >/dev/null
+          config_ok=false
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error \
+              --max-time 15 \
+              "https://monitor.fyzure.fyi/api/config?health=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
+              -o /tmp/cfsm-config.json \
+              && jq -e --arg expected_version "$expected_version" '
+                type == "object" and
+                (.version == $expected_version) and
+                (.is_public | type == "boolean")
+              ' /tmp/cfsm-config.json >/dev/null; then
+              config_ok=true
+              break
+            fi
+            echo "Production config has not converged to ${expected_version} yet (attempt ${attempt}/12)."
+            sleep 5
+          done
+
+          if [ "$config_ok" != true ]; then
+            echo "::error::Production /api/config did not converge to expected version ${expected_version}."
+            cat /tmp/cfsm-config.json || true
+            exit 1
+          fi
 
           curl --fail --silent --show-error \
             --retry 6 --retry-delay 5 --retry-all-errors \
