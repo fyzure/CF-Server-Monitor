@@ -124,10 +124,6 @@ async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
     return simpleAuthResponse();
   }
   
-  if (hours > 24 && !isLoggedIn) {
-    return createUnauthorizedResponse();
-  }
-  
   const server = await getServerDetail(env.DB, id, isLoggedIn);
   if (!server) return createNotFoundResponse();
   
