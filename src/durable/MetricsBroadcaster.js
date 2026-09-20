@@ -432,8 +432,15 @@ export class MetricsBroadcaster {
     });
   }
 
+  _isFrontendAttachmentVisible(attachment) {
+    return attachment?.visible !== false;
+  }
+
   _getFrontendSubscriberCount() {
-    return this._getFrontendWebSockets().length;
+    return this._getFrontendWebSockets().filter(ws => {
+      const attachment = ws.deserializeAttachment() || {};
+      return this._isFrontendAttachmentVisible(attachment);
+    }).length;
   }
 
   _getFrontendSubscriptionStats() {
@@ -441,6 +448,7 @@ export class MetricsBroadcaster {
     let detailSubscribers = 0;
     for (const ws of this._getFrontendWebSockets()) {
       const attachment = ws.deserializeAttachment() || {};
+      if (!this._isFrontendAttachmentVisible(attachment)) continue;
       if (attachment.scope === 'all') dashboardSubscribers += 1;
       else if (this._isValidServerId(String(attachment.scope || ''))) detailSubscribers += 1;
     }
@@ -453,8 +461,8 @@ export class MetricsBroadcaster {
 
   _getFrontendAllSubscriberCount() {
     return this._getFrontendWebSockets().filter(ws => {
-      const attachment = ws.deserializeAttachment();
-      return attachment?.scope === 'all';
+      const attachment = ws.deserializeAttachment() || {};
+      return attachment.scope === 'all' && this._isFrontendAttachmentVisible(attachment);
     }).length;
   }
 
@@ -1103,6 +1111,7 @@ export class MetricsBroadcaster {
 
     for (const ws of this._getFrontendWebSockets()) {
       const attachment = ws.deserializeAttachment() || {};
+      if (!this._isFrontendAttachmentVisible(attachment)) continue;
       if (attachment.scope === normalizedServerId && normalizedServerId) {
         detailActive = true;
       } else if (
@@ -1202,7 +1211,7 @@ export class MetricsBroadcaster {
     return DEFAULT_WSS_REPORT_INTERVAL * 1000;
   }
 
-  async _hintAgentRealtimeIntervals(realtimeState = null) {
+  async _hintAgentRealtimeIntervals(realtimeState = null, includeIdle = false) {
     const now = Date.now();
     if (now - this.lastAgentRealtimeHintAt < 1000) return 0;
     this.lastAgentRealtimeHintAt = now;
@@ -1221,7 +1230,7 @@ export class MetricsBroadcaster {
       const state = realtimeState
         ? this._normalizeRealtimeState(realtimeState)
         : this._getAgentRealtimeState(now, attachment.serverId);
-      if (!state.frontendActive) continue;
+      if (!state.frontendActive && !includeIdle) continue;
 
       const wssReportIntervalMs = await this._getAgentHintReportIntervalMs(attachment);
       const nextWssReportAfterMs = this._getAgentNextWssReportAfterMs(
@@ -1533,7 +1542,7 @@ export class MetricsBroadcaster {
       this.state.acceptWebSocket(server);
 
       // 将订阅 scope 和空 serverIds 附加到 WebSocket（休眠后仍保留）
-      server.serializeAttachment({ scope, serverIds: [] });
+      server.serializeAttachment({ scope, serverIds: [], visible: true });
 
       // 立即发送 hello 让客户端确认连接成功
       try {
@@ -2068,6 +2077,7 @@ export class MetricsBroadcaster {
     for (const ws of websockets) {
       const attachment = ws.deserializeAttachment();
       if (!attachment) continue;
+      if (!this._isFrontendAttachmentVisible(attachment)) continue;
       if (targetScope === 'all' && attachment.scope !== 'all') continue;
       if (targetScope === 'single' && attachment.scope === 'all') continue;
 
@@ -2120,7 +2130,10 @@ export class MetricsBroadcaster {
         }
 
         const serverIds = normalizedServerIds.ids;
-        ws.serializeAttachment({ scope, serverIds });
+        const visible = typeof msg.visible === 'boolean'
+          ? msg.visible
+          : this._isFrontendAttachmentVisible(current);
+        ws.serializeAttachment({ scope, serverIds, visible });
         try {
           ws.send(JSON.stringify({
             type: 'subscribed',
@@ -2130,9 +2143,22 @@ export class MetricsBroadcaster {
           }));
         } catch (_) {}
         try {
-          await this._hintAgentRealtimeIntervals();
+          await this._hintAgentRealtimeIntervals(null, true);
         } catch (e) {
           console.warn('[ws] Failed to hint agent realtime interval:', e?.message || e);
+        }
+        return;
+      }
+      if (msg && msg.type === 'visibility' && typeof msg.visible === 'boolean') {
+        const current = ws.deserializeAttachment() || {};
+        ws.serializeAttachment({
+          ...current,
+          visible: msg.visible
+        });
+        try {
+          await this._hintAgentRealtimeIntervals(null, true);
+        } catch (e) {
+          console.warn('[ws] Failed to apply frontend visibility hint:', e?.message || e);
         }
         return;
       }

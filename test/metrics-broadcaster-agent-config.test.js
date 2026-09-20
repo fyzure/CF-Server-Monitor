@@ -421,7 +421,16 @@ test('frontend realtime state distinguishes dashboard and server detail subscrip
       };
     }
   };
-  const broadcaster = makeBroadcaster([dashboardWs, detailWs]);
+  const hiddenDashboardWs = {
+    deserializeAttachment() {
+      return {
+        scope: 'all',
+        serverIds: ['server-3'],
+        visible: false
+      };
+    }
+  };
+  const broadcaster = makeBroadcaster([dashboardWs, detailWs, hiddenDashboardWs]);
 
   assert.deepEqual(broadcaster._getFrontendRealtimeState('server-1'), {
     dashboardActive: true,
@@ -485,7 +494,9 @@ test('frontend subscription stats separate dashboard and detail sockets', () => 
   const broadcaster = makeBroadcaster([
     { deserializeAttachment() { return { scope: 'all', serverIds: ['server-1'] }; } },
     { deserializeAttachment() { return { scope: 'server-1', serverIds: [] }; } },
-    { deserializeAttachment() { return { scope: 'server-2', serverIds: [] }; } }
+    { deserializeAttachment() { return { scope: 'server-2', serverIds: [] }; } },
+    { deserializeAttachment() { return { scope: 'all', serverIds: ['server-3'], visible: false }; } },
+    { deserializeAttachment() { return { scope: 'server-3', serverIds: [], visible: false }; } }
   ]);
 
   assert.deepEqual(broadcaster._getFrontendSubscriptionStats(), {
@@ -493,6 +504,79 @@ test('frontend subscription stats separate dashboard and detail sockets', () => 
     detailSubscribers: 2,
     subscribers: 3
   });
+});
+
+test('frontend visibility message excludes hidden sockets and refreshes agent cadence', async () => {
+  let attachment = {
+    scope: 'all',
+    serverIds: ['server-1'],
+    visible: true
+  };
+  const ws = {
+    deserializeAttachment() {
+      return attachment;
+    },
+    serializeAttachment(value) {
+      attachment = value;
+    }
+  };
+  const broadcaster = makeBroadcaster([ws]);
+  const hintCalls = [];
+  broadcaster._hintAgentRealtimeIntervals = async (state, includeIdle) => {
+    hintCalls.push({ state, includeIdle });
+    return 0;
+  };
+
+  await broadcaster.webSocketMessage(ws, JSON.stringify({
+    type: 'visibility',
+    visible: false
+  }));
+
+  assert.equal(attachment.visible, false);
+  assert.deepEqual(hintCalls, [{ state: null, includeIdle: true }]);
+  assert.deepEqual(broadcaster._getFrontendRealtimeState('server-1'), {
+    dashboardActive: false,
+    detailActive: false,
+    frontendActive: false
+  });
+  assert.equal(broadcaster._getFrontendSubscriberCount(), 0);
+});
+
+test('frontend subscribe message persists initial visibility state', async () => {
+  let attachment = {
+    scope: 'all',
+    serverIds: [],
+    visible: true
+  };
+  const sent = [];
+  const ws = {
+    deserializeAttachment() {
+      return attachment;
+    },
+    serializeAttachment(value) {
+      attachment = value;
+    },
+    send(message) {
+      sent.push(JSON.parse(message));
+    }
+  };
+  const broadcaster = makeBroadcaster([ws]);
+  broadcaster._hintAgentRealtimeIntervals = async () => 0;
+
+  await broadcaster.webSocketMessage(ws, JSON.stringify({
+    type: 'subscribe',
+    scope: 'all',
+    ids: ['server-1'],
+    visible: false
+  }));
+
+  assert.deepEqual(attachment, {
+    scope: 'all',
+    serverIds: ['server-1'],
+    visible: false
+  });
+  assert.equal(sent[0].type, 'subscribed');
+  assert.equal(broadcaster._getFrontendSubscriberCount(), 0);
 });
 
 test('frontend realtime hint pushes active interval to connected agents', async () => {
