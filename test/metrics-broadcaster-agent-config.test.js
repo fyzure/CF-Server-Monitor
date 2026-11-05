@@ -302,53 +302,48 @@ test('WSS agent config state only requests ack for fields in current report', ()
   );
 });
 
-test('WSS agent uses hibernating WebSocket and preserves attachment state', async () => {
-  const webSockets = [];
-  const broadcaster = makeBroadcaster(webSockets);
+test('WSS agent Hibernation API preserves attachment state', async () => {
+  const registered = [];
+  const broadcaster = makeBroadcaster(registered);
   const sent = [];
-  let attachment = null;
+  let attachment = {};
   const server = {
-    accept() {
-      throw new Error('standard WebSocket accept must not be used');
-    },
-    send(message) {
-      sent.push(message);
-    },
-    close() {},
     serializeAttachment(value) {
       attachment = value;
     },
     deserializeAttachment() {
       return attachment;
-    }
+    },
+    send(message) {
+      sent.push(message);
+    },
+    close() {}
   };
 
+  let finish;
+  const handled = new Promise(resolve => {
+    finish = resolve;
+  });
   broadcaster._handleAgentReportMessage = async (ws, rawMessage, attachment) => {
     assert.equal(rawMessage, '{"metrics":{}}');
     assert.equal(attachment.kind, 'agent-report');
     ws.serializeAttachment({ ...attachment, authenticated: true, serverId: 'server-1' });
     ws.send('ok');
+    finish();
   };
 
   const ws = broadcaster._acceptHibernatingAgentWebSocket(server, { kind: 'agent-report' });
-  assert.equal(webSockets.length, 1);
-  assert.equal(webSockets[0], server);
+  assert.equal(ws, server);
+  assert.deepEqual(registered, [server]);
   assert.equal(broadcaster._getAgentReportWebSockets().length, 1);
 
   await broadcaster.webSocketMessage(ws, '{"metrics":{}}');
+  await handled;
+
   assert.equal(ws.deserializeAttachment().serverId, 'server-1');
   assert.deepEqual(sent, ['ok']);
-});
 
-test('hibernating WebSocket close handler completes the close handshake', () => {
-  const broadcaster = makeBroadcaster();
-  let closeArgs = null;
-  broadcaster.webSocketClose({
-    close(code, reason) {
-      closeArgs = [code, reason];
-    }
-  }, 1000, 'done');
-  assert.deepEqual(closeArgs, [1000, 'done']);
+  assert.equal(broadcaster._getAgentReportWebSockets().length, 1);
 });
 
 test('WSS agent ack suggests configured realtime or idle report interval', () => {
@@ -382,201 +377,6 @@ test('WSS agent ack suggests configured realtime or idle report interval', () =>
     }),
     4000
   );
-  assert.equal(
-    broadcaster._getAgentNextWssReportAfterMs(2000, 60000, {
-      dashboardActive: true,
-      detailActive: false,
-      frontendActive: true,
-      resourceAlertActive: false,
-      realtimeActive: true
-    }),
-    10000
-  );
-  assert.equal(
-    broadcaster._getAgentNextWssReportAfterMs(2000, 60000, {
-      dashboardActive: true,
-      detailActive: true,
-      frontendActive: true,
-      resourceAlertActive: false,
-      realtimeActive: true
-    }),
-    2000
-  );
-});
-
-test('frontend realtime state distinguishes dashboard and server detail subscriptions', () => {
-  const dashboardWs = {
-    deserializeAttachment() {
-      return {
-        scope: 'all',
-        serverIds: ['server-1', 'server-2']
-      };
-    }
-  };
-  const detailWs = {
-    deserializeAttachment() {
-      return {
-        scope: 'server-2',
-        serverIds: []
-      };
-    }
-  };
-  const hiddenDashboardWs = {
-    deserializeAttachment() {
-      return {
-        scope: 'all',
-        serverIds: ['server-3'],
-        visible: false
-      };
-    }
-  };
-  const broadcaster = makeBroadcaster([dashboardWs, detailWs, hiddenDashboardWs]);
-
-  assert.deepEqual(broadcaster._getFrontendRealtimeState('server-1'), {
-    dashboardActive: true,
-    detailActive: false,
-    frontendActive: true
-  });
-  assert.deepEqual(broadcaster._getFrontendRealtimeState('server-2'), {
-    dashboardActive: true,
-    detailActive: true,
-    frontendActive: true
-  });
-  assert.deepEqual(broadcaster._getFrontendRealtimeState('server-3'), {
-    dashboardActive: false,
-    detailActive: false,
-    frontendActive: false
-  });
-});
-
-test('frontend realtime hints keep dashboard at summary cadence and detail at realtime cadence', async () => {
-  const sent = new Map();
-  const makeAgent = (serverId) => ({
-    deserializeAttachment() {
-      return {
-        kind: 'agent-report',
-        authenticated: true,
-        serverId,
-        reportIntervalMs: 60000,
-        wssReportIntervalMs: 2000
-      };
-    },
-    send(message) {
-      sent.set(serverId, JSON.parse(message));
-    }
-  });
-  const dashboardWs = {
-    deserializeAttachment() {
-      return { scope: 'all', serverIds: ['server-1', 'server-2'] };
-    }
-  };
-  const detailWs = {
-    deserializeAttachment() {
-      return { scope: 'server-2', serverIds: [] };
-    }
-  };
-  const broadcaster = makeBroadcaster([
-    makeAgent('server-1'),
-    makeAgent('server-2'),
-    dashboardWs,
-    detailWs
-  ]);
-  broadcaster._getAgentHintReportIntervalMs = async () => 2000;
-
-  const hinted = await broadcaster._hintAgentRealtimeIntervals();
-
-  assert.equal(hinted, 2);
-  assert.equal(sent.get('server-1').nextWssReportAfterMs, 10000);
-  assert.equal(sent.get('server-2').nextWssReportAfterMs, 2000);
-});
-
-test('frontend subscription stats separate dashboard and detail sockets', () => {
-  const broadcaster = makeBroadcaster([
-    { deserializeAttachment() { return { scope: 'all', serverIds: ['server-1'] }; } },
-    { deserializeAttachment() { return { scope: 'server-1', serverIds: [] }; } },
-    { deserializeAttachment() { return { scope: 'server-2', serverIds: [] }; } },
-    { deserializeAttachment() { return { scope: 'all', serverIds: ['server-3'], visible: false }; } },
-    { deserializeAttachment() { return { scope: 'server-3', serverIds: [], visible: false }; } }
-  ]);
-
-  assert.deepEqual(broadcaster._getFrontendSubscriptionStats(), {
-    dashboardSubscribers: 1,
-    detailSubscribers: 2,
-    subscribers: 3
-  });
-});
-
-test('frontend visibility message excludes hidden sockets and refreshes agent cadence', async () => {
-  let attachment = {
-    scope: 'all',
-    serverIds: ['server-1'],
-    visible: true
-  };
-  const ws = {
-    deserializeAttachment() {
-      return attachment;
-    },
-    serializeAttachment(value) {
-      attachment = value;
-    }
-  };
-  const broadcaster = makeBroadcaster([ws]);
-  const hintCalls = [];
-  broadcaster._hintAgentRealtimeIntervals = async (state, includeIdle) => {
-    hintCalls.push({ state, includeIdle });
-    return 0;
-  };
-
-  await broadcaster.webSocketMessage(ws, JSON.stringify({
-    type: 'visibility',
-    visible: false
-  }));
-
-  assert.equal(attachment.visible, false);
-  assert.deepEqual(hintCalls, [{ state: null, includeIdle: true }]);
-  assert.deepEqual(broadcaster._getFrontendRealtimeState('server-1'), {
-    dashboardActive: false,
-    detailActive: false,
-    frontendActive: false
-  });
-  assert.equal(broadcaster._getFrontendSubscriberCount(), 0);
-});
-
-test('frontend subscribe message persists initial visibility state', async () => {
-  let attachment = {
-    scope: 'all',
-    serverIds: [],
-    visible: true
-  };
-  const sent = [];
-  const ws = {
-    deserializeAttachment() {
-      return attachment;
-    },
-    serializeAttachment(value) {
-      attachment = value;
-    },
-    send(message) {
-      sent.push(JSON.parse(message));
-    }
-  };
-  const broadcaster = makeBroadcaster([ws]);
-  broadcaster._hintAgentRealtimeIntervals = async () => 0;
-
-  await broadcaster.webSocketMessage(ws, JSON.stringify({
-    type: 'subscribe',
-    scope: 'all',
-    ids: ['server-1'],
-    visible: false
-  }));
-
-  assert.deepEqual(attachment, {
-    scope: 'all',
-    serverIds: ['server-1'],
-    visible: false
-  });
-  assert.equal(sent[0].type, 'subscribed');
-  assert.equal(broadcaster._getFrontendSubscriberCount(), 0);
 });
 
 test('frontend realtime hint pushes active interval to connected agents', async () => {

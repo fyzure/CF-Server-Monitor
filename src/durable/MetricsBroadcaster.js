@@ -13,6 +13,7 @@
 // - 通过 setWebSocketAutoResponse 自动响应 ping，无需唤醒 DO。
 
 import { saveMetricsHistory } from '../database/schema.js';
+import { evaluateTrafficAlert } from '../services/notification.js';
 import { ensureServerOptimization } from '../database/indexOptimization.js';
 import { getServerDetail, clearServerDetailCache } from '../utils/cache.js';
 import { getWssReportScheduleState, loadSiteSettings } from '../utils/settings.js';
@@ -38,7 +39,6 @@ import {
   toBroadcastSamples
 } from '../handlers/update.js';
 import {
-  AGENT_DASHBOARD_WSS_REPORT_INTERVAL_MS,
   AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS,
   AGENT_MIN_IDLE_WSS_REPORT_INTERVAL_MS,
   AGENT_SERVER_DETAIL_TTL_MS,
@@ -432,37 +432,14 @@ export class MetricsBroadcaster {
     });
   }
 
-  _isFrontendAttachmentVisible(attachment) {
-    return attachment?.visible !== false;
-  }
-
   _getFrontendSubscriberCount() {
-    return this._getFrontendWebSockets().filter(ws => {
-      const attachment = ws.deserializeAttachment() || {};
-      return this._isFrontendAttachmentVisible(attachment);
-    }).length;
-  }
-
-  _getFrontendSubscriptionStats() {
-    let dashboardSubscribers = 0;
-    let detailSubscribers = 0;
-    for (const ws of this._getFrontendWebSockets()) {
-      const attachment = ws.deserializeAttachment() || {};
-      if (!this._isFrontendAttachmentVisible(attachment)) continue;
-      if (attachment.scope === 'all') dashboardSubscribers += 1;
-      else if (this._isValidServerId(String(attachment.scope || ''))) detailSubscribers += 1;
-    }
-    return {
-      dashboardSubscribers,
-      detailSubscribers,
-      subscribers: dashboardSubscribers + detailSubscribers
-    };
+    return this._getFrontendWebSockets().length;
   }
 
   _getFrontendAllSubscriberCount() {
     return this._getFrontendWebSockets().filter(ws => {
-      const attachment = ws.deserializeAttachment() || {};
-      return attachment.scope === 'all' && this._isFrontendAttachmentVisible(attachment);
+      const attachment = ws.deserializeAttachment();
+      return attachment?.scope === 'all';
     }).length;
   }
 
@@ -489,8 +466,7 @@ export class MetricsBroadcaster {
   }
 
   _acceptHibernatingAgentWebSocket(server, initialAttachment) {
-    // 必须由 Durable Object Hibernation API 接管 Agent 长连接。
-    // 使用标准 WebSocket accept 会让只要任意 Agent 在线，整个 DO 都无法休眠并持续计费。
+    // 使用 Hibernation API 接管 Agent 长连接，降低闲置时的计费时长。
     this.state.acceptWebSocket(server);
     server.serializeAttachment(initialAttachment || {});
     return server;
@@ -1104,66 +1080,27 @@ export class MetricsBroadcaster {
     this._broadcastBatch(updates, ts, 'all');
   }
 
-  _getFrontendRealtimeState(serverId) {
-    const normalizedServerId = String(serverId || '');
-    let dashboardActive = false;
-    let detailActive = false;
-
-    for (const ws of this._getFrontendWebSockets()) {
-      const attachment = ws.deserializeAttachment() || {};
-      if (!this._isFrontendAttachmentVisible(attachment)) continue;
-      if (attachment.scope === normalizedServerId && normalizedServerId) {
-        detailActive = true;
-      } else if (
-        attachment.scope === 'all' &&
-        Array.isArray(attachment.serverIds) &&
-        attachment.serverIds.includes(normalizedServerId)
-      ) {
-        dashboardActive = true;
-      }
-      if (dashboardActive && detailActive) break;
-    }
-
-    return {
-      dashboardActive,
-      detailActive,
-      frontendActive: dashboardActive || detailActive
-    };
-  }
-
-  _getAgentRealtimeState(now = Date.now(), serverId = '') {
-    const frontend = this._getFrontendRealtimeState(serverId);
+  _getAgentRealtimeState(now = Date.now()) {
+    const frontendActive = this._getFrontendSubscriberCount() > 0;
     const resourceAlertActive = this._shouldCacheResourceAlertSamples(now);
     return {
-      ...frontend,
+      frontendActive,
       resourceAlertActive,
-      realtimeActive: frontend.frontendActive || resourceAlertActive
+      realtimeActive: frontendActive || resourceAlertActive
     };
   }
 
   _normalizeRealtimeState(realtimeState) {
     if (realtimeState && typeof realtimeState === 'object') {
-      const hasTieredState =
-        Object.prototype.hasOwnProperty.call(realtimeState, 'dashboardActive') ||
-        Object.prototype.hasOwnProperty.call(realtimeState, 'detailActive');
-      const dashboardActive = realtimeState.dashboardActive === true;
-      const detailActive = hasTieredState
-        ? realtimeState.detailActive === true
-        : realtimeState.frontendActive === true;
-      const frontendActive = dashboardActive || detailActive || realtimeState.frontendActive === true;
       return {
-        dashboardActive,
-        detailActive,
-        frontendActive,
+        frontendActive: realtimeState.frontendActive === true,
         resourceAlertActive: realtimeState.resourceAlertActive === true,
         realtimeActive: realtimeState.realtimeActive === true ||
-          frontendActive ||
+          realtimeState.frontendActive === true ||
           realtimeState.resourceAlertActive === true
       };
     }
     return {
-      dashboardActive: false,
-      detailActive: realtimeState === true,
       frontendActive: realtimeState === true,
       resourceAlertActive: false,
       realtimeActive: realtimeState === true
@@ -1180,14 +1117,9 @@ export class MetricsBroadcaster {
       AGENT_MIN_IDLE_WSS_REPORT_INTERVAL_MS,
       Number(reportIntervalMs) || AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS
     );
-    if (state.detailActive) return normalizedWssReportIntervalMs;
-    if (state.dashboardActive) {
-      return Math.max(
-        AGENT_DASHBOARD_WSS_REPORT_INTERVAL_MS,
-        normalizedWssReportIntervalMs
-      );
-    }
-    return normalizedReportIntervalMs;
+    return state.frontendActive
+      ? normalizedWssReportIntervalMs
+      : normalizedReportIntervalMs;
   }
 
   async _getAgentHintReportIntervalMs(attachment) {
@@ -1211,8 +1143,10 @@ export class MetricsBroadcaster {
     return DEFAULT_WSS_REPORT_INTERVAL * 1000;
   }
 
-  async _hintAgentRealtimeIntervals(realtimeState = null, includeIdle = false) {
+  async _hintAgentRealtimeIntervals(realtimeState = null) {
     const now = Date.now();
+    const state = realtimeState || this._getAgentRealtimeState(now);
+    if (!state.frontendActive) return 0;
     if (now - this.lastAgentRealtimeHintAt < 1000) return 0;
     this.lastAgentRealtimeHintAt = now;
 
@@ -1226,11 +1160,6 @@ export class MetricsBroadcaster {
       ) {
         continue;
       }
-
-      const state = realtimeState
-        ? this._normalizeRealtimeState(realtimeState)
-        : this._getAgentRealtimeState(now, attachment.serverId);
-      if (!state.frontendActive && !includeIdle) continue;
 
       const wssReportIntervalMs = await this._getAgentHintReportIntervalMs(attachment);
       const nextWssReportAfterMs = this._getAgentNextWssReportAfterMs(
@@ -1303,6 +1232,23 @@ export class MetricsBroadcaster {
         payload.timestamp,
         payload.agentVersion
       );
+      // 月流量阈值告警：写入成功后台非阻塞执行（waitUntil），不阻塞 WebSocket 消息循环
+      if (typeof this.state?.waitUntil === 'function') {
+        this.state.waitUntil((async () => {
+          try {
+            const trafficServerDetail = await this._getAgentServerDetail(serverId);
+            if (!trafficServerDetail) return;
+            await evaluateTrafficAlert(this.env, trafficServerDetail, metrics, {
+              patchCache: (id, value) => {
+                const entry = this.agentServerDetails.get(id);
+                if (entry && entry.data) entry.data.traffic_alert_state = value;
+              }
+            });
+          } catch (e) {
+            console.error('[traffic-alert] DO evaluate failed:', e);
+          }
+        })());
+      }
       const persistedAt = Date.now();
       state.lastD1WriteTs = persistedAt;
       const currentAttachment = ws.deserializeAttachment() || attachment;
@@ -1399,7 +1345,7 @@ export class MetricsBroadcaster {
       serverId: context.serverId,
       samples: broadcastSamples
     }];
-    const realtimeState = this._getAgentRealtimeState(reportTs, context.serverId);
+    const realtimeState = this._getAgentRealtimeState(reportTs);
     if (realtimeState.realtimeActive) {
       await this._ingestRealtimeUpdates(normalizedUpdates, reportTs, { batchFrontend: true });
     } else {
@@ -1542,7 +1488,7 @@ export class MetricsBroadcaster {
       this.state.acceptWebSocket(server);
 
       // 将订阅 scope 和空 serverIds 附加到 WebSocket（休眠后仍保留）
-      server.serializeAttachment({ scope, serverIds: [], visible: true });
+      server.serializeAttachment({ scope, serverIds: [] });
 
       // 立即发送 hello 让客户端确认连接成功
       try {
@@ -1733,7 +1679,7 @@ export class MetricsBroadcaster {
 
     // ── 3) 健康检查 ────────────────────────────────────
     if (method === 'GET' && (path === '/health' || path.endsWith('/health'))) {
-      const subscriptionStats = this._getFrontendSubscriptionStats();
+      const subscribers = this._getFrontendSubscriberCount();
       const sockets = this.state.getWebSockets();
       const agentSockets = sockets.filter(ws => {
         const attachment = ws.deserializeAttachment();
@@ -1741,7 +1687,7 @@ export class MetricsBroadcaster {
       }).length;
       return new Response(JSON.stringify({
         ok: true,
-        ...subscriptionStats,
+        subscribers,
         sockets: sockets.length,
         agentSockets,
         agentWebSocketMode: 'hibernation'
@@ -2077,7 +2023,6 @@ export class MetricsBroadcaster {
     for (const ws of websockets) {
       const attachment = ws.deserializeAttachment();
       if (!attachment) continue;
-      if (!this._isFrontendAttachmentVisible(attachment)) continue;
       if (targetScope === 'all' && attachment.scope !== 'all') continue;
       if (targetScope === 'single' && attachment.scope === 'all') continue;
 
@@ -2130,10 +2075,7 @@ export class MetricsBroadcaster {
         }
 
         const serverIds = normalizedServerIds.ids;
-        const visible = typeof msg.visible === 'boolean'
-          ? msg.visible
-          : this._isFrontendAttachmentVisible(current);
-        ws.serializeAttachment({ scope, serverIds, visible });
+        ws.serializeAttachment({ scope, serverIds });
         try {
           ws.send(JSON.stringify({
             type: 'subscribed',
@@ -2143,22 +2085,13 @@ export class MetricsBroadcaster {
           }));
         } catch (_) {}
         try {
-          await this._hintAgentRealtimeIntervals(null, true);
+          await this._hintAgentRealtimeIntervals({
+            frontendActive: true,
+            resourceAlertActive: this._shouldCacheResourceAlertSamples(),
+            realtimeActive: true
+          });
         } catch (e) {
           console.warn('[ws] Failed to hint agent realtime interval:', e?.message || e);
-        }
-        return;
-      }
-      if (msg && msg.type === 'visibility' && typeof msg.visible === 'boolean') {
-        const current = ws.deserializeAttachment() || {};
-        ws.serializeAttachment({
-          ...current,
-          visible: msg.visible
-        });
-        try {
-          await this._hintAgentRealtimeIntervals(null, true);
-        } catch (e) {
-          console.warn('[ws] Failed to apply frontend visibility hint:', e?.message || e);
         }
         return;
       }
@@ -2166,7 +2099,7 @@ export class MetricsBroadcaster {
     } catch (_) {}
   }
 
-  // compatibility_date 仍早于 2026-04-07，需要显式完成 Close handshake。
+  // 兼容当前 compatibility_date：显式完成 Close handshake。
   webSocketClose(ws, code, reason) {
     try {
       ws.close(code, reason);

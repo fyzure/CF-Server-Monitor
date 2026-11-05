@@ -1,5 +1,4 @@
 import { getLatestMetricsForAllServers } from '../database/schema.js';
-import { updateDatabase } from '../database/updateDatabase.js';
 import { clearServersListCache, getAllServers } from '../utils/cache.js';
 import {
   DEFAULT_NOTIFICATION_TEMPLATE,
@@ -18,7 +17,14 @@ import {
   normalizeNotificationWebhookMethod,
   debug
 } from '../utils/settings.js';
-import { detectBillingCycle, normalizeBillingCycle, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
+import {
+  GB,
+  getTrafficUsageBytes,
+  normalizePct,
+  normalizePctOrNull,
+  normalizeTrafficLimitGb
+} from '../utils/traffic.js';
+import { detectBillingCycle, isEnabledFlag, normalizeBillingCycle, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
 import {
   NOTIFICATION_MAX_RETRIES,
   NOTIFICATION_RETRY_DELAY_MS,
@@ -31,29 +37,6 @@ const RESOURCE_ALERT_STATE_ACTIVE = 'active';
 const RESOURCE_ALERT_STATE_RECOVERED = 'recovered';
 const RESOURCE_ALERT_STATE_KEY = 'resource_alert_state';
 const DAY_MS = 24 * 60 * 60 * 1000;
-const TRAFFIC_REPORT_SERVER_BATCH_SIZE = 50;
-const TRAFFIC_REPORT_NOTIFICATION_SOFT_LIMIT = 3000;
-
-function isMissingColumnError(error) {
-  const message = error?.message || String(error);
-  return /no such column|has no column/i.test(message);
-}
-
-async function saveTrafficSnapshots(db, snapshots, serverId) {
-  const write = () => db.prepare('UPDATE servers SET traffic_snapshots = ? WHERE id = ?')
-    .bind(JSON.stringify(snapshots), serverId).run();
-
-  try {
-    await write();
-  } catch (error) {
-    if (!isMissingColumnError(error)) throw error;
-
-    console.warn('[TrafficReport] 检测到数据库字段缺失，尝试升级数据库后重试...');
-    const upgrade = await updateDatabase(db);
-    if (!upgrade?.success) throw error;
-    await write();
-  }
-}
 
 function getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   const date = new Date(timestamp);
@@ -124,27 +107,6 @@ function parseDateSerial(dateString) {
     return NaN;
   }
   return Math.floor(date.getTime() / DAY_MS);
-}
-
-function formatDateSerial(serial) {
-  const date = new Date(serial * DAY_MS);
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
-}
-
-function formatTrafficBytes(value) {
-  const bytes = Math.max(0, Number(value) || 0);
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-  let size = bytes;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size.toFixed(unit === 0 || size >= 100 ? 0 : size >= 10 ? 1 : 2)} ${units[unit]}`;
-}
-
-function isTrafficReportEnabled(settings, field) {
-  return normalizeBooleanSetting(settings?.[field]) === 'true';
 }
 
 function formatMegabitsPerSecond(value) {
@@ -668,11 +630,210 @@ async function sendCustomWebhookNotification(settings, context) {
   await fetchWithRetry(endpoint, options);
 }
 
+// SMTP 通知复用 tg_bot_token 字段，配置以 "smtp:" 前缀协议存储（方案 A）。
+// 格式: smtp://<user>:<password>@<host>:<port>?from=<from>&to=<to1,to2>&secure=<auto|tls|starttls>
+export function isSmtpNotificationTarget(token) {
+  // 与前端保持一致：协议头大小写不敏感（SMTP:// 同样识别）
+  return String(token || '').trim().toLowerCase().indexOf('smtp:') === 0;
+}
+
 function hasNotificationTarget(settings) {
   if (normalizeBooleanSetting(settings?.notification_webhook_enabled) === 'true') {
     return String(settings?.notification_webhook_url || '').trim().length > 0;
   }
+  // 内置渠道（含 SMTP）只要 tg_bot_token 非空即视为已配置目标
   return String(settings?.tg_bot_token || '').trim().length > 0;
+}
+
+// ===== 月流量阈值告警（上报路径触发，账期重置=数值回落，状态={u,th,lim}）=====
+const TRAFFIC_ALERT_STATE_KEY = 'traffic_alert_state';
+const TRAFFIC_ALERT_RESET_FACTOR = 0.5;
+
+function parseTrafficAlertState(raw) {
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw);
+    if (o && Number.isFinite(o.u) && o.u > 0) {
+      return { u: Math.round(o.u), th: normalizePct(o.th), lim: normalizeTrafficLimitGb(o.lim) };
+    }
+  } catch (_) {}
+  return null;
+}
+
+// hooks.patchCache?.(serverId, valueOrNull) —— 缓存实现由调用方注入，本函数不 import 任何 cache 模块
+export async function evaluateTrafficAlert(env, server, metrics, hooks = {}) {
+  try {
+    if (!env?.DB || !server || !metrics) return;
+
+    const limit = normalizeTrafficLimitGb(server.traffic_limit);
+    if (limit <= 0) return; // 未设限额：不监控
+
+    const settings = await loadSiteSettings(env.DB);
+    const globalPct = normalizePct(settings?.traffic_alert_threshold);
+    // 逐台阈值三态：null/未设置 → 跟随全局；数字（含 0）→ 覆盖，0 = 显式关闭该服务器告警
+    const pctServer = normalizePctOrNull(server.traffic_alert_percent);
+    const effectivePct = pctServer === null ? globalPct : pctServer;
+    if (effectivePct <= 0) return;                 // 阈值关闭 / 该服务器显式关闭
+    if (!hasNotificationTarget(settings)) return;  // 未配置通知渠道：不发也不写
+
+    const used = Math.round(getTrafficUsageBytes(
+      metrics.net_rx_monthly,
+      metrics.net_tx_monthly,
+      server.traffic_calc_type
+    ));
+    const limitBytes = limit * GB;
+    const percent = (used / limitBytes) * 100;
+
+    const oldStr = server[TRAFFIC_ALERT_STATE_KEY] == null ? '' : String(server[TRAFFIC_ALERT_STATE_KEY]);
+    const state = parseTrafficAlertState(server[TRAFFIC_ALERT_STATE_KEY]);
+
+    if (state) {
+      // ① 回落=新账期/重装/大校正 → 持久清零（不可只在内存即时重算）
+      if (used < state.u * TRAFFIC_ALERT_RESET_FACTOR) {
+        const { meta } = await env.DB.prepare(
+          `UPDATE servers SET traffic_alert_state = NULL WHERE id = ? AND COALESCE(traffic_alert_state,'') = ?`
+        ).bind(server.id, oldStr).run();
+        if (meta && meta.changes > 0) hooks.patchCache?.(server.id, null);
+        return;
+      }
+      // ② 规则签名一致且未回落 → 同账期已发，抑制
+      if (state.th === effectivePct && state.lim === limit) return;
+      // ③ th/lim 变 → 重新可发，继续
+    }
+
+    if (percent < effectivePct) return; // 未达阈值
+
+    // 先发后写
+    const serverName = server.name || server.id;
+    const msg = `${serverName}  本月已用 ${(used / GB).toFixed(1)} GB / 限额 ${limit} GB（${percent.toFixed(1)}% ≥ ${effectivePct}%）`;
+    const err = await sendNotification(settings, msg, {
+      event: '月流量告警',
+      emoji: '📈',
+      clients: [serverName],
+      count: 1,
+      message: msg
+    });
+    if (err) return; // 失败：不写，下次上报重试
+
+    const newStr = JSON.stringify({ u: used, th: effectivePct, lim: limit });
+    const { meta } = await env.DB.prepare(
+      `UPDATE servers SET traffic_alert_state = ? WHERE id = ? AND COALESCE(traffic_alert_state,'') = ?`
+    ).bind(newStr, server.id, oldStr).run();
+    if (meta && meta.changes > 0) hooks.patchCache?.(server.id, newStr);
+  } catch (e) {
+    console.error('[traffic-alert] evaluate failed:', e);
+  }
+}
+
+const SMTP_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// 信封地址防注入：剥离 CR/LF 并校验邮箱格式（subject/body 已有 sanitize，信封同样需要）
+function normalizeSmtpAddress(value) {
+  return String(value || '').replace(/[\r\n]/g, '').trim();
+}
+
+function parseSmtpNotificationConfig(rawToken) {
+  const url = new URL(String(rawToken).trim());
+  const host = url.hostname;
+  if (!host) throw new Error('缺少 SMTP 主机');
+
+  const secureParam = (url.searchParams.get('secure') || 'auto').toLowerCase();
+  // 不提供 'off'（明文传输），避免凭据被静默降级为明文发送
+  const allowedSecure = ['auto', 'tls', 'starttls'];
+  const secureTransport = allowedSecure.includes(secureParam) ? secureParam : 'auto';
+  const port = url.port ? Number(url.port) : (secureTransport === 'tls' ? 465 : 587);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error('SMTP 端口无效');
+  }
+  // Cloudflare Workers 永久封禁 25 端口出站
+  if (port === 25) {
+    throw new Error('Cloudflare Workers 不支持 25 端口，请使用 465(implicit TLS) 或 587(STARTTLS)');
+  }
+  // auto 模式下非 465/587 端口会被库推导为明文连接，必须显式指定加密方式
+  if (secureTransport === 'auto' && port !== 465 && port !== 587) {
+    throw new Error('非 465/587 端口必须显式指定加密方式 (secure=tls 或 secure=starttls)');
+  }
+
+  const decode = value => {
+    try {
+      return decodeURIComponent(value);
+    } catch (_) {
+      return value;
+    }
+  };
+  const username = decode(url.username || '');
+  const password = decode(url.password || '');
+  if (!username) throw new Error('缺少 SMTP 用户名');
+  if (!password) throw new Error('缺少 SMTP 密码');
+
+  const from = normalizeSmtpAddress(url.searchParams.get('from') || username);
+  if (!SMTP_EMAIL_PATTERN.test(from)) throw new Error('SMTP 发件人地址无效');
+  const to = (url.searchParams.get('to') || '')
+    .split(',')
+    .map(normalizeSmtpAddress)
+    .filter(Boolean);
+  if (to.length === 0) throw new Error('缺少收件人 (to)');
+  if (to.some(address => !SMTP_EMAIL_PATTERN.test(address))) {
+    throw new Error('SMTP 收件人地址无效');
+  }
+
+  return { host, port, username, password, from, to, secureTransport };
+}
+
+// 仅对临时性失败重试：连接类异常与 4xx（如 421/450 限流、暂时不可用）；
+// 5xx 为永久性拒绝（550 收件人拒绝等），454 为认证失败（部分邮箱如 QQ 使用 4xx 码），
+// 两者重试无意义且易触发邮箱风控
+function isSmtpRetryableError(error) {
+  const match = String(error?.message || error).match(/SMTP error (\d{3})/);
+  if (!match) return true;
+  const code = Number(match[1]);
+  return code >= 400 && code < 500 && code !== 454;
+}
+
+async function withSmtpRetry(task, retries = NOTIFICATION_MAX_RETRIES) {
+  let lastError;
+  for (let i = 0; i < retries; i++) {
+    try {
+      await task();
+      return;
+    } catch (e) {
+      lastError = e;
+      if (!isSmtpRetryableError(e)) break;
+      if (i < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, NOTIFICATION_RETRY_DELAY_MS));
+      }
+    }
+  }
+  throw lastError || new Error('Max retries exceeded');
+}
+
+async function sendSmtpNotification(settings, context, formattedMsg) {
+  let config;
+  try {
+    config = parseSmtpNotificationConfig(settings.tg_bot_token);
+  } catch (e) {
+    return `SMTP 通知配置错误: ${e.message}`;
+  }
+  try {
+    // 动态导入：cloudflare-smtp 依赖 cloudflare:sockets，仅在运行时（Workers）加载
+    const { sendMail } = await import('cloudflare-smtp');
+    const subject = `${context.emoji || ''} ${context.event || '通知'}`.trim();
+    const text = String(formattedMsg || '').replace(/\*/g, '');
+    await withSmtpRetry(() => sendMail(
+      {
+        host: config.host,
+        port: config.port,
+        username: config.username,
+        password: config.password,
+        from: config.from,
+        to: config.to,
+        secureTransport: config.secureTransport
+      },
+      { subject, text }
+    ));
+    return;
+  } catch (e) {
+    return `SMTP 邮件通知发送失败: ${e.message}`;
+  }
 }
 
 export async function sendNotification(settings, msg, notificationContext = {}) {
@@ -692,6 +853,10 @@ export async function sendNotification(settings, msg, notificationContext = {}) 
   }
 
   if(!settings.tg_bot_token) return;
+  if (isSmtpNotificationTarget(settings.tg_bot_token)) {
+    // SMTP 邮件通知（前缀协议: smtp://...），置于内置渠道分发链最前
+    return await sendSmtpNotification(settings, context, formattedMsg);
+  }
   if(settings.tg_bot_token.indexOf("onebot:") == 0) {
     // OneBot 协议 (QQ 等)，私聊格式: onebot:http://127.0.0.1:3000/send_private_msg?access_token=xxx
     // 群聊格式: onebot:http://127.0.0.1:3000/send_group_msg?access_token=xxx
@@ -1129,302 +1294,6 @@ export async function checkResourceAlerts(env) {
   }
 }
 
-export function calculateTrafficDelta(current, previous) {
-  const currentValue = Math.max(0, Number(current) || 0);
-  if (previous === null || previous === undefined) return 0;
-  const previousValue = Math.max(0, Number(previous) || 0);
-  return currentValue >= previousValue ? currentValue - previousValue : currentValue;
-}
-
-export function normalizeTrafficSnapshots(value) {
-  try {
-    const parsed = typeof value === 'string' ? JSON.parse(value || '{}') : value;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const result = {};
-    for (const type of ['daily', 'weekly', 'monthly']) {
-      const snapshot = parsed[type];
-      if (!snapshot || typeof snapshot !== 'object') continue;
-      const time = Number(snapshot.time);
-      if (!Number.isFinite(time) || time <= 0) continue;
-      result[type] = {
-        time,
-        rx_bytes: Math.max(0, Number(snapshot.rx_bytes) || 0),
-        tx_bytes: Math.max(0, Number(snapshot.tx_bytes) || 0)
-      };
-    }
-    return result;
-  } catch (_) {
-    return {};
-  }
-}
-
-export function getTrafficPeriodKeys(timestamp, timezone) {
-  const serial = getZonedDateSerial(timestamp, timezone);
-  const parts = getZonedDateParts(timestamp, timezone);
-  if (!Number.isFinite(serial) || !parts) return null;
-  const weekday = ((serial + 4) % 7 + 7) % 7;
-  const mondayOffset = (weekday + 6) % 7;
-  return {
-    daily: formatDateSerial(serial),
-    weekly: formatDateSerial(serial - mondayOffset),
-    monthly: `${parts.year}-${parts.month}`
-  };
-}
-
-export function getDueTrafficReportTypes(timestamp, timezone) {
-  const keys = getTrafficPeriodKeys(timestamp, timezone);
-  if (!keys) return [];
-  const parts = getZonedDateParts(timestamp, timezone);
-  const serial = getZonedDateSerial(timestamp, timezone);
-  const weekday = ((serial + 4) % 7 + 7) % 7;
-  const types = [];
-  types.push('daily');
-  if (weekday === 1) types.push('weekly');
-  if (Number(parts.day) === 1) types.push('monthly');
-  return types;
-}
-
-function isPreviousTrafficPeriod(snapshot, timestamp, type, timezone) {
-  const previousTimestamp = Number(snapshot?.time) * 1000;
-  if (!Number.isFinite(previousTimestamp) || previousTimestamp >= timestamp) return false;
-
-  const currentKeys = getTrafficPeriodKeys(timestamp, timezone);
-  const previousKeys = getTrafficPeriodKeys(previousTimestamp, timezone);
-  if (!currentKeys || !previousKeys) return false;
-
-  if (type === 'daily') {
-    return parseDateSerial(currentKeys.daily) - parseDateSerial(previousKeys.daily) === 1;
-  }
-  if (type === 'weekly') {
-    return parseDateSerial(currentKeys.weekly) - parseDateSerial(previousKeys.weekly) === 7;
-  }
-  if (type === 'monthly') {
-    const currentParts = getZonedDateParts(timestamp, timezone);
-    const previousParts = getZonedDateParts(previousTimestamp, timezone);
-    return currentParts && previousParts &&
-      (Number(currentParts.year) * 12 + Number(currentParts.month)) -
-      (Number(previousParts.year) * 12 + Number(previousParts.month)) === 1;
-  }
-  return false;
-}
-
-async function claimTrafficReportTypes(db, reportTypes, periodKeys) {
-  const claimedTypes = [];
-  for (const type of reportTypes) {
-    const result = await db.prepare(`
-      INSERT INTO settings (key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      WHERE value <> excluded.value
-    `).bind(`traffic_report_last_${type}`, periodKeys[type]).run();
-    if (result.meta?.changes > 0) claimedTypes.push(type);
-  }
-  return claimedTypes;
-}
-
-async function releaseTrafficReportTypes(db, reportTypes, periodKeys) {
-  await Promise.all(reportTypes.map(type => db.prepare(
-    'DELETE FROM settings WHERE key = ? AND value = ?'
-  ).bind(`traffic_report_last_${type}`, periodKeys[type]).run()));
-}
-
-export function updateTrafficSnapshots(value, currentRx, currentTx, timestamp, types, timezone = 'UTC') {
-  const snapshots = normalizeTrafficSnapshots(value);
-  const nowSeconds = Math.floor(timestamp / 1000);
-  const rx = Math.max(0, Number(currentRx) || 0);
-  const tx = Math.max(0, Number(currentTx) || 0);
-  const usage = {};
-  let changed = false;
-
-  for (const type of types) {
-    const previous = snapshots[type];
-    if (previous && isPreviousTrafficPeriod(previous, timestamp, type, timezone)) {
-      usage[type] = {
-        rx_bytes: calculateTrafficDelta(rx, previous.rx_bytes),
-        tx_bytes: calculateTrafficDelta(tx, previous.tx_bytes)
-      };
-    }
-    snapshots[type] = { time: nowSeconds, rx_bytes: rx, tx_bytes: tx };
-    changed = true;
-  }
-  return { snapshots, usage, changed };
-}
-
-export function buildTrafficReportContent(servers, rows, label) {
-  const usageByServer = new Map((rows || []).map(row => [row.server_id, row]));
-  const lines = [];
-  const clients = [];
-  let totalRx = 0;
-  let totalTx = 0;
-  let measuredCount = 0;
-  const missingLabels = {
-    '每日': '暂无昨日数据',
-    '每周': '暂无上周数据',
-    '每月': '暂无上月数据'
-  };
-
-  for (const server of servers) {
-    const usage = usageByServer.get(server.id);
-    if (!usage) continue;
-    clients.push(server.name);
-    if (usage.missing) {
-      lines.push(`${server.name}  ${missingLabels[label] || '暂无上一周期数据'}`);
-      continue;
-    }
-    const rx = Math.max(0, Number(usage.rx_bytes) || 0);
-    const tx = Math.max(0, Number(usage.tx_bytes) || 0);
-    totalRx += rx;
-    totalTx += tx;
-    measuredCount += 1;
-    lines.push(`${server.name}  ↓ ${formatTrafficBytes(rx)} + ↑ ${formatTrafficBytes(tx)}  = ${formatTrafficBytes(rx + tx)}`);
-  }
-
-  if (lines.length === 0) return null;
-  if (measuredCount > 0) {
-    lines.push(`总计  ↓ ${formatTrafficBytes(totalRx)} + ↑ ${formatTrafficBytes(totalTx)}  = ${formatTrafficBytes(totalRx + totalTx)}`);
-  }
-  return {
-    msg: lines.join('\n'),
-    context: {
-      event: `${label}流量报告`,
-      emoji: '📊',
-      clients,
-      count: clients.length,
-      message: lines.join('\n')
-    }
-  };
-}
-
-export function buildTrafficReportPayloads(servers, rows, label, batchSize = TRAFFIC_REPORT_SERVER_BATCH_SIZE) {
-  const rowServerIds = new Set((Array.isArray(rows) ? rows : []).map(row => row.server_id));
-  const normalizedServers = (Array.isArray(servers) ? servers : [])
-    .filter(server => rowServerIds.has(server.id));
-  const normalizedBatchSize = Math.max(1, Math.floor(Number(batchSize) || TRAFFIC_REPORT_SERVER_BATCH_SIZE));
-  const batches = [];
-  let currentBatch = [];
-
-  for (const server of normalizedServers) {
-    const candidate = [...currentBatch, server];
-    const candidateReport = buildTrafficReportContent(candidate, rows, label);
-    const exceedsCount = candidate.length > normalizedBatchSize;
-    const exceedsLength = currentBatch.length > 0 &&
-      candidateReport?.msg.length > TRAFFIC_REPORT_NOTIFICATION_SOFT_LIMIT;
-    if (exceedsCount || exceedsLength) {
-      batches.push(currentBatch);
-      currentBatch = [server];
-    } else {
-      currentBatch = candidate;
-    }
-  }
-  if (currentBatch.length > 0) batches.push(currentBatch);
-
-  const totalBatches = batches.length;
-  const payloads = [];
-
-  for (let index = 0; index < batches.length; index += 1) {
-    const batchServers = batches[index];
-    const report = buildTrafficReportContent(batchServers, rows, label);
-    if (!report) continue;
-    if (totalBatches > 1) {
-      report.context.event = `${label}流量报告（${index + 1}/${totalBatches}）`;
-    }
-    payloads.push(report);
-  }
-
-  return payloads;
-}
-
-export async function checkTrafficReports(db, options = {}) {
-  const settings = await loadSiteSettings(db);
-  const now = Number(options.now || Date.now());
-  if (!isTrafficReportEnabled(settings, 'traffic_report_enabled')) return false;
-  if (options.scheduled && !isExpireNotificationTimeDue(settings, now)) return false;
-  const zonedParts = getZonedDateParts(now, settings.notification_timezone);
-  if (options.scheduledMinute !== undefined && Number(zonedParts?.minute) !== Number(options.scheduledMinute)) return false;
-  const dueTypes = getDueTrafficReportTypes(now, settings.notification_timezone);
-  const requestedTypes = Array.isArray(options.reportTypes) && options.reportTypes.length > 0
-    ? new Set(options.reportTypes)
-    : null;
-  let reportTypes = requestedTypes
-    ? dueTypes.filter(type => requestedTypes.has(type))
-    : dueTypes;
-  if (options.staggered && zonedParts) {
-    const baseMinute = 0;
-    const slot = Number(zonedParts.minute) - baseMinute;
-    const utcDate = new Date(now);
-    const isSundayRotationWindow = utcDate.getUTCDay() === 0 && utcDate.getUTCHours() === 0;
-    // On the Sunday 00:00 UTC history-table rotation only, leave a wider
-    // buffer before traffic reports. Keep the normal slots otherwise.
-    const slotType = isSundayRotationWindow
-      ? (slot === 5 ? 'daily' : slot === 6 ? 'weekly' : slot === 7 ? 'monthly' : null)
-      : (slot === 0 ? 'daily' : slot === 1 ? 'weekly' : slot === 2 ? 'monthly' : null);
-    reportTypes = slotType &&
-      dueTypes.includes(slotType) &&
-      (!requestedTypes || requestedTypes.has(slotType))
-      ? [slotType]
-      : [];
-  }
-  if (reportTypes.length === 0) return false;
-  const servers = await getAllServers(db);
-  for (const server of servers) {
-    server.traffic_snapshots = normalizeTrafficSnapshots(server.traffic_snapshots);
-  }
-  const latestMetrics = await getLatestMetricsForAllServers(db);
-  const periodKeys = getTrafficPeriodKeys(now, settings.notification_timezone);
-  const claimedReportTypes = await claimTrafficReportTypes(
-    db,
-    reportTypes,
-    periodKeys
-  );
-  if (claimedReportTypes.length === 0) return false;
-
-  try {
-    const usageRows = { daily: [], weekly: [], monthly: [] };
-
-    for (const server of servers) {
-      const metrics = latestMetrics.get(server.id);
-      if (!metrics) continue;
-      const result = updateTrafficSnapshots(
-        server.traffic_snapshots,
-        metrics.net_rx,
-        metrics.net_tx,
-        now,
-        claimedReportTypes,
-        settings.notification_timezone
-      );
-      for (const type of claimedReportTypes) {
-        usageRows[type].push(result.usage[type]
-          ? { server_id: server.id, ...result.usage[type] }
-          : { server_id: server.id, missing: true });
-      }
-      if (result.changed) {
-        await saveTrafficSnapshots(db, result.snapshots, server.id);
-        server.traffic_snapshots = result.snapshots;
-      }
-    }
-
-    if (!hasNotificationTarget(settings)) return true;
-    const reports = [
-      ...(claimedReportTypes.includes('daily') ? buildTrafficReportPayloads(servers, usageRows.daily, '每日') : []),
-      ...(claimedReportTypes.includes('weekly') ? buildTrafficReportPayloads(servers, usageRows.weekly, '每周') : []),
-      ...(claimedReportTypes.includes('monthly') ? buildTrafficReportPayloads(servers, usageRows.monthly, '每月') : [])
-    ];
-
-    for (const report of reports) {
-      const error = await sendNotification(settings, report.msg, report.context);
-      if (error) console.warn('[TrafficReport] notification failed:', error);
-    }
-
-    return true;
-  } catch (error) {
-    try {
-      await releaseTrafficReportTypes(db, claimedReportTypes, periodKeys);
-    } catch (releaseError) {
-      console.warn('[TrafficReport] failed to release report claim:', releaseError);
-    }
-    throw error;
-  }
-}
-
 export async function checkExpiringServers(db, options = {}) {
   const siteSettings = await loadSiteSettings(db);
   const now = Number(options?.now || Date.now());
@@ -1438,23 +1307,27 @@ export async function checkExpiringServers(db, options = {}) {
     const expiringServers = [];
     const reminderDays = getExpireReminderDays(siteSettings.expire_reminder);
     const shouldNotify = reminderDays > 0 && hasNotificationTarget(siteSettings);
-    let hasRenewedServers = false;
+    const renewedServers = [];
     const currentDateSerial = getZonedDateSerial(now, siteSettings.notification_timezone);
 
     for (const s of allServers) {
       if (!s.expire_date) continue;
 
       const billingCycle = normalizeBillingCycle(detectBillingCycle(s.price) || s.billing_cycle);
-      const renewal = renewExpireDateIfNeeded(s.expire_date, billingCycle, s.auto_renewal, now, 1);
+      // 续费时机 = 到期日 - min(提醒天数, 5)，最长提前 5 天
+      const renewal = renewExpireDateIfNeeded(s.expire_date, billingCycle, s.auto_renewal, now, Math.min(reminderDays, 5));
       if (renewal.renewed) {
         await db.prepare(
           'UPDATE servers SET expire_date = ?, billing_cycle = ? WHERE id = ?'
         ).bind(renewal.expire_date, billingCycle, s.id).run();
         s.expire_date = renewal.expire_date;
         s.billing_cycle = billingCycle;
-        hasRenewedServers = true;
+        renewedServers.push({ name: s.name, expire_date: renewal.expire_date });
         debug(`[Cron] 服务器 ${s.name} 已自动续费，到期日期更新为 ${s.expire_date}`);
       }
+
+      // 勾选自动续费的节点只走「续费成功」提醒，不计入到期提醒
+      if (isEnabledFlag(s.auto_renewal)) continue;
 
       if (!shouldNotify) continue;
 
@@ -1470,21 +1343,42 @@ export async function checkExpiringServers(db, options = {}) {
       }
     }
 
-    if (hasRenewedServers) {
+    if (renewedServers.length > 0) {
       clearServersListCache();
+
+      // 续费成功提醒：与「到期提醒」开关解耦，只要配置了通知渠道就发送
+      if (hasNotificationTarget(siteSettings)) {
+        const renewalList = renewedServers.map(s => `${s.name}  新到期 ${s.expire_date}`).join('\n');
+        debug(`[Cron] 发送自动续费成功通知: ${renewalList}`);
+        try {
+          await sendNotification(siteSettings, renewalList, {
+            event: '服务器自动续费成功',
+            emoji: '✅',
+            clients: renewedServers.map(s => s.name),
+            count: renewedServers.length,
+            message: renewalList
+          });
+        } catch (e) {
+          console.error('自动续费成功通知发送失败:', e);
+        }
+      }
     }
 
     if (expiringServers.length > 0) {
       const serverList = expiringServers.map(s => `${s.name}  剩余${s.days}天  ${s.expire_date}`).join('\n');
       const msg = serverList;
       debug(`[Cron] 发送到期提醒通知: ${msg}`);
-      await sendNotification(siteSettings, msg, {
-        event: '服务器到期提醒',
-        emoji: '⚠️',
-        clients: expiringServers.map(s => s.name),
-        count: expiringServers.length,
-        message: serverList
-      });
+      try {
+        await sendNotification(siteSettings, msg, {
+          event: '服务器到期提醒',
+          emoji: '⚠️',
+          clients: expiringServers.map(s => s.name),
+          count: expiringServers.length,
+          message: serverList
+        });
+      } catch (e) {
+        console.error('服务器到期提醒通知发送失败:', e);
+      }
     }
     return true;
   } catch (e) {

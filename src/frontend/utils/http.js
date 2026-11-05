@@ -1,4 +1,5 @@
 import { getApiBases } from './config'
+import { STORAGE } from './constants'
 
 const DEFAULT_ERROR_MESSAGES = {
   401: 'Unauthorized',
@@ -7,7 +8,10 @@ const DEFAULT_ERROR_MESSAGES = {
   500: 'Internal Server Error'
 }
 
-const TURNSTILE_VERIFIED_KEY = 'turnstile_verified'
+const TURNSTILE_VERIFIED_KEY = STORAGE.TURNSTILE_VERIFIED
+// 启动路径等关键请求的超时时长，需通过 options.timeoutMs 显式启用；
+// 未启用的请求（如 /updateDatabase、长历史查询）保持无超时，避免误伤合法慢接口
+export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 
 const getAdminPath = () => {
   return '/admin'
@@ -18,6 +22,7 @@ const redirectToAdminLogin = () => {
 
   const adminPath = getAdminPath()
   if (window.location.pathname === adminPath || window.location.pathname.startsWith(`${adminPath}/`)) {
+    // 401 时 handleResponse 已清除 jwt_token，reload 后后台落到登录页，不会再次触发 401
     window.location.reload()
     return
   }
@@ -35,14 +40,14 @@ const createHeaders = (includeAuth = true, includeTurnstile = true, baseUrl = nu
   }
   
   if (includeAuth) {
-    const token = localStorage.getItem('jwt_token')
+    const token = localStorage.getItem(STORAGE.JWT_TOKEN)
     if (token) {
       headers['Authorization'] = 'Bearer ' + token
     }
   }
   
   if (includeTurnstile && includeTurnstileToken) {
-    const turnstileToken = localStorage.getItem('turnstile_token')
+    const turnstileToken = localStorage.getItem(STORAGE.TURNSTILE_TOKEN)
     if (turnstileToken) {
       headers['X-Turnstile-Token'] = turnstileToken
     }
@@ -62,7 +67,7 @@ const handleResponse = async (res, options = {}) => {
   const { autoRedirect = true, baseUrl = null } = options
   
   if (res.status === 401) {
-    localStorage.removeItem('jwt_token')
+    localStorage.removeItem(STORAGE.JWT_TOKEN)
     if (autoRedirect) {
       redirectToAdminLogin()
     }
@@ -70,7 +75,7 @@ const handleResponse = async (res, options = {}) => {
   }
   
   if (res.status === 403) {
-    localStorage.removeItem('turnstile_token')
+    localStorage.removeItem(STORAGE.TURNSTILE_TOKEN)
     localStorage.removeItem(TURNSTILE_VERIFIED_KEY)
     if (autoRedirect) {
       window.location.reload()
@@ -106,7 +111,7 @@ const handleResponse = async (res, options = {}) => {
     const data = await res.json()
     if (data && data.turnstile_verified) {
       localStorage.setItem(TURNSTILE_VERIFIED_KEY, data.turnstile_verified)
-      localStorage.removeItem('turnstile_token')
+      localStorage.removeItem(STORAGE.TURNSTILE_TOKEN)
     }
     return { data, status: res.status }
   } catch (e) {
@@ -114,37 +119,59 @@ const handleResponse = async (res, options = {}) => {
   }
 }
 
+const doFetch = async (url, init, timeoutMs = null) => {
+  if (!timeoutMs) {
+    return fetch(url, init)
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 const request = async (method, url, body, options = {}) => {
-  const { includeAuth = true, includeTurnstile = true, autoRedirect = true, baseUrl = null } = options
+  const { includeAuth = true, includeTurnstile = true, autoRedirect = true, baseUrl = null, timeoutMs = null } = options
   const headers = createHeaders(includeAuth, includeTurnstile, baseUrl, options)
   const base = baseUrl || getApiBases()[0]
 
   try {
-    const res = await fetch(`${base}${url}`, {
+    const res = await doFetch(`${base}${url}`, {
       method,
       headers,
       body: body != null ? JSON.stringify(body) : undefined,
       credentials: 'include'
-    })
+    }, timeoutMs)
     return { ...(await handleResponse(res, { autoRedirect, baseUrl: base })), baseUrl: base }
   } catch (e) {
+    if (e.name === 'AbortError') {
+      return { error: 'timeout', status: 0, baseUrl: base, timeout: true }
+    }
     return { error: e.message || 'Network error', status: 0, baseUrl: base }
   }
 }
 
 const fetchWithBase = async (baseUrl, url, options, method = 'GET', body = null) => {
-  const { includeAuth = true, includeTurnstile = true, autoRedirect = true } = options
+  const { includeAuth = true, includeTurnstile = true, autoRedirect = true, timeoutMs = null } = options
   const headers = createHeaders(includeAuth, includeTurnstile, baseUrl, options)
 
-  const res = await fetch(`${baseUrl}${url}`, {
-    method,
-    headers,
-    body,
-    credentials: 'include'
-  })
-
-  const result = await handleResponse(res, { autoRedirect, baseUrl })
-  return { ...result, baseUrl }
+  try {
+    const res = await doFetch(`${baseUrl}${url}`, {
+      method,
+      headers,
+      body,
+      credentials: 'include'
+    }, timeoutMs)
+    const result = await handleResponse(res, { autoRedirect, baseUrl })
+    return { ...result, baseUrl }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      return { error: 'timeout', status: 0, baseUrl, timeout: true }
+    }
+    throw e
+  }
 }
 
 export const http = {
@@ -230,7 +257,7 @@ export const http = {
 }
 
 export const isAdminLoggedIn = () => {
-  return !!localStorage.getItem('jwt_token')
+  return !!localStorage.getItem(STORAGE.JWT_TOKEN)
 }
 
 export default http

@@ -10,12 +10,12 @@
   <a href="README-en.md">English</a>
 </p>
 
-[![Workers](https://img.shields.io/badge/Workers-2.8.6%20Beta2-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
+[![Workers](https://img.shields.io/badge/Workers-2.8.6%20Stable-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
 [![GitHub Stars](https://img.shields.io/github/stars/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/forks)
 [![License](https://img.shields.io/badge/License-MIT-16a34a?style=flat-square)](#许可证)
 
-[在线演示](https://demo.huilang.me/) · [API 文档](API.md) · [Go 探针文档](https://github.com/huilang-me/cfsm-agent) · [主题开发](theme-develop.md)
+[在线演示](https://demo.huilang.me/) · [API 文档](API.md) · [Go 探针文档](https://github.com/huilang-me/cfsm-agent) · [主题开发](theme-develop.md) · [主题开发 AI 提示词](theme-ai-prompt.md)
 
 </div>
 
@@ -23,7 +23,7 @@
 
 CF-Server-Monitor 是一个部署在 Cloudflare Workers 上的服务器监控系统。服务器端安装 Agent 后会单向上报指标到 Worker，数据写入 D1，并通过 Durable Objects + WebSocket 推送到前端，实现免费托管、低维护的实时监控。
 
-支持主流 Linux 发行版、Alpine Linux、OpenWrt、macOS、群晖 DSM、飞牛 fnOS、Windows 等系统。
+支持主流 Linux 发行版、Alpine Linux、OpenWrt、macOS、群晖 DSM、飞牛 fnOS、Windows 等系统，并提供 Docker 镜像部署方式。
 
 高安全性：Agent 仅单向上报指标，不提供 WebSSH、远程命令下发或主控通道；支持非 root 运行，可降低监控组件被利用后的影响范围。
 
@@ -64,12 +64,12 @@ CF-Server-Monitor 是一个部署在 Cloudflare Workers 上的服务器监控系
 | --------- | -------------------------------------------------------------------------------- |
 | 实时监控      | CPU、GPU、内存、交换分区、磁盘、磁盘 IO、网络、连接数、进程数、负载、运行时间                                      |
 | 历史数据      | 7 天历史图表、长时段采样、实时网速、月流量统计与校正                                                      |
-| 网络质量      | 电信、联通、移动、BGP 节点延迟与丢包率追踪；三网详情开启时首页从 D1 最近 1 小时抽样最多 20 个点，并合并当前最新 Ping，D1 结果缓存 2 分钟 |
+| 网络质量      | 电信、联通、移动、BGP 节点延迟与丢包率追踪；三网详情开启时首页从 D1 最近 2 小时抽样最多 20 个真实点并缓存 5 分钟 |
 | 多视图前台     | 条形图、环形图、表格、地图视图，支持桌面端和移动端                                                        |
 | 管理后台      | 服务器增删改查、拖拽排序、隐藏服务器、导入导出、批量删除、数据库维护                                               |
-| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows；默认 Go 版本，保留 Shell/PowerShell 版本 |
+| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows，支持 Docker 镜像部署；默认 Go 版本，保留 Shell/PowerShell 版本 |
 | 实时推送      | Durable Objects + WebSocket，Agent 上报后前端即时刷新                                      |
-| 告警通知      | 离线告警、恢复通知、到期提醒、资源负载告警、每日/每周/每月流量报告                                           |
+| 告警通知      | 离线告警、恢复通知、到期提醒、资源负载告警                                                            |
 | 多语言       | 前端内置中文和英文切换；文档提供中文与英文入口                                                          |
 | 多站点       | 支持 GitHub Pages 静态前台和多个 Worker API 聚合展示                                          |
 | 小组件       | 提供 iOS Scriptable 小组件脚本，适合移动端快速查看                                                |
@@ -97,7 +97,7 @@ flowchart LR
 
 近期变化：
 
-- `2.8.6`：新增流量报告功能,WSS前端订阅250ms批量上报
+- `2.8.6`：WSS前端订阅采用250毫秒批量上报，新增SMTP通知渠道，新增月度流量阈值告警，移除旧版数据库兼容性，新增Docker安装方式。
 - `2.8.5`：支持自定义 Ping 节点名称；增加ICMP模式；优化WSS响应逻辑；API接口优化；原皮前端优化；新增4个ping节点。
 - `2.8.4`：新增 Agent WSS 上报和 WSS 开启时段，提升实时数据推送及时性，并允许非目标时段自动改用 POST 降低 Do 时长消耗；该能力要求 Agent 升级到 `v1.0.10+`。新增账户Do用量展示，优化无前端订阅时的 Do 实时广播请求，降低空闲额度消耗。通知设置新增自定义 Webhook 渠道, 新增前端wss超时配置。
 - `2.8.3`：新增磁盘 IO 统计，默认 Agent 切换为 Go 版本，新增服务器延迟与丢包率实时窗口。
@@ -227,6 +227,23 @@ loginctl enable-linger 用户名
 
 卸载时请选择原来的安装用户。OpenWrt、Alpine/OpenRC、Synology DSM 等不支持 `systemd --user` 的环境，请使用对应系统命令。
 
+### Docker 部署
+
+后台复制安装命令的目标系统支持选择 Docker，会生成如下容器命令（服务器 ID、Secret、Worker 地址已按当前服务器自动填充，镜像标签默认 `latest`，可在 Agent 版本栏自定义）：
+
+```bash
+docker run -d --name cf-probe --restart=unless-stopped --network=host \
+  -v cf-probe-data:/data \
+  -e SERVER_ID=<服务器ID> -e SECRET='<API_SECRET>' -e WORKER_URL=https://<你的后台地址>/update \
+  ghcr.io/huilang-me/cfsm-agent:latest
+```
+
+采集间隔、上报间隔、Ping 节点、网卡、流量重置日、上下行校正等运行参数由 Agent 按 `SERVER_ID` 从后台动态拉取，无需在命令中重复指定；更换镜像标签即回退/升级到指定版本。卸载容器：
+
+```bash
+docker rm -f cf-probe && docker volume rm cf-probe-data
+```
+
 ## 配置说明
 
 ### Worker 环境变量
@@ -262,7 +279,7 @@ npm run build:github-page
 | 站点设置          | 标题、背景、favicon、默认展示模式、默认外观、默认语言、三网详情、公开访问策略 |
 | 服务器参数         | HTTP/WSS 上报间隔、采集间隔、Ping 节点、网卡、月流量、价格、到期时间、自动续费 |
 | 安全设置          | 管理员账号密码、JWT Secret、Turnstile          |
-| 通知设置          | 离线告警、到期提醒、资源负载告警、流量报告、测试通知            |
+| 通知设置          | 离线告警、到期提醒、资源负载告警、测试通知                 |
 | 外观设置          | 自定义 CSS、`<head>`、CSP 白名单、Mikus 模式     |
 | 数据库管理         | 升级数据库、清空历史数据                          |
 | Cloudflare 用量 | 查询 D1 行读写和 Workers 请求量                |
@@ -283,7 +300,7 @@ npm run build:github-page
 
 ## 通知与告警
 
-在管理后台 -> 全局设置 -> 通知 中配置。通知分为“内置渠道”和“自定义 Webhook”两种渠道；选择自定义 Webhook 后，后端只会发送 Webhook，不会再调用内置渠道。
+在管理后台 -> 全局设置 -> 通知 中配置。通知分为“内置渠道”、“SMTP 邮件”和“自定义 Webhook”三种渠道；选择自定义 Webhook 后，后端只会发送 Webhook，不会再调用内置渠道。
 
 ### 内置渠道
 
@@ -300,6 +317,24 @@ npm run build:github-page
 | Server 酱    | `https://sctapi.ftqq.com/<SendKey>.send` 或 `server:https://example.com/<SendKey>.send` | 留空          |
 | WxPusher    | `https://wxpusher.zjiecode.com/api/send/message/[SPT_xxx]/Hello` | 留空          |
 | Gotify      | `https://gotify.example.com/message?token=xxx`                   | 留空          |
+
+### SMTP 邮件
+
+选择“SMTP 邮件”渠道后，在设置面板填写 SMTP 服务器、端口、加密方式、用户名、密码、发件人和收件人即可，无需手动拼接配置。后端会将其序列化为 `smtp://` 前缀协议存入 `tg_bot_token` 字段，并通过 [`cloudflare-smtp`](https://github.com/Bruol/cloudflare-smtp)（基于 `cloudflare:sockets`）直连邮件服务器发送纯文本邮件。
+
+配置格式（前端自动生成，手动填写内置渠道 Bot Token 时亦可使用）：
+
+```text
+smtp://<用户名>:<密码>@<host>:<port>?from=<发件人>&to=<收件人1,收件人2>&secure=<auto|tls|starttls>
+```
+
+注意事项：
+
+- **Cloudflare Workers 永久封禁 25 端口出站**，只能使用 `465`（隐式 TLS）或 `587`（STARTTLS）；`secure` 缺省时按端口自动选择。
+- 用户名、密码中的特殊字符需 URL 编码（例如 `@` 写作 `%40`），前端表单会自动处理。
+- QQ 邮箱、163 邮箱等需使用 **SMTP 授权码**而非登录密码；发件人留空时默认等于用户名。
+- 当前仅发送纯文本邮件（不支持 HTML、附件、抄送），发送失败会按 `NOTIFICATION_MAX_RETRIES` 自动重试。
+- 能否成功送达还取决于邮件服务商对 Cloudflare 出口 IP 及 SPF / DKIM 的校验策略。
 
 ### 自定义 Webhook
 
@@ -347,7 +382,6 @@ npm run build:github-page
 - 离线告警：节点离线达到设定阈值后通知，恢复后发送恢复通知。
 - 到期提醒：服务器到期前 1 到 7 天内，按通知时区和到期通知时间每天提醒，也可关闭。
 - 资源负载告警：按 CPU、内存、磁盘、上下行速率等指标配置规则。
-- 流量报告：开启后按通知时区维护日、周、月三个 JSON 网卡流量基线；日报每天发送，周报在周一发送，月报在每月 1 日发送。没有上一周期基线时，通知会显示暂无数据。服务器或 Agent 重启可能使网卡计数归零并影响当前周期统计。
 
 配置后请先点击发送测试通知，再保存配置。
 
@@ -394,7 +428,10 @@ npm run build:github-page
 - 第三方主题 GitHub tree 地址
 - 管理员预览主题
 
-第三方主题只反代主题仓库中的 `index.html` 与 `assets/`，管理后台仍使用内置主题。开发自定义主题请参考 [theme-develop.md](theme-develop.md)。
+第三方主题只反代主题仓库中的 `index.html` 与 `assets/`，管理后台仍使用内置主题。开发自定义主题请参考：
+
+- [theme-ai-prompt.md](theme-ai-prompt.md)：主题开发 AI 提示词，开发者直接整段粘贴给 AI 编码助手使用，内含数据流、D1 消耗铁律和完工自查清单
+- [theme-develop.md](theme-develop.md)：完整 API 字段定义与鉴权说明
 
 ## 升级与维护
 
@@ -468,7 +505,7 @@ Go 版本和旧 Shell / PowerShell 版本卸载脚本只清理各自安装的服
 | Cron          | 说明                         |
 | ------------- | -------------------------- |
 | `*/1 * * * *` | 每分钟检测离线节点、资源告警 |
-| `0 * * * *`   | 每小时执行合并任务，包括月表轮换、旧表清理，并按通知时区执行到期检测和流量报告 |
+| `0 * * * *`   | 每小时执行合并任务，包括月表轮换、旧表清理，并按通知时区/到期通知小时执行到期检测 |
 
 ## 本地开发
 
@@ -558,6 +595,7 @@ CF-Server-Monitor/
 ├── test/                    # 本地测试和模拟数据工具
 ├── API.md                   # REST / WebSocket API 文档
 ├── theme-develop.md         # 第三方主题开发文档
+├── theme-ai-prompt.md       # 主题开发 AI 提示词（粘贴给 AI 使用）
 ├── wrangler.toml            # 本地 Wrangler 配置
 └── version.json             # Worker / Agent 版本
 ```
@@ -594,6 +632,10 @@ CF-Server-Monitor/
 
 进入 Cloudflare D1 数据库 `server-monitor-db`，打开 `setting` 表，编辑 `site_options` 的 `password` 字段。旧版 MD5 兼容值 `e10adc3949ba59abbe56e057f20f883e` 对应密码 `123456`，保存后可用该密码登录，再到后台重新设置强密码。
 
+### 未托管在CF的域名不能绑定
+
+可以通过部署[CFSM-PROXY](https://github.com/huilang-me/CFSM-PROXY) Pages项目实现反代，绑定未托管在CF的域名
+
 ### 国内服务器无法上报
 
 建议绑定自定义域名到 Worker。无法绑定时，可临时通过 hosts 指向可用的 Cloudflare CDN IP：
@@ -601,6 +643,8 @@ CF-Server-Monitor/
 ```bash
 echo <CF_CDN_IP> <你的探针域名> | sudo tee -a /etc/hosts
 ```
+
+如果使用[CFSM-PROXY](https://github.com/huilang-me/CFSM-PROXY)的用户，请手动修改安装命令的url参数为绑定的域名
 
 ### Ping 结果异常或全是 1
 
@@ -641,6 +685,7 @@ echo <CF_CDN_IP> <你的探针域名> | sudo tee -a /etc/hosts
 - [API.md](API.md)：REST API、WebSocket、鉴权、错误码和数据结构
 - [https://github.com/huilang-me/cfsm-agent](cfsm-agent)：Go 版本 Agent 配置、升级、日志与排障
 - [theme-develop.md](theme-develop.md)：第三方主题开发
+- [theme-ai-prompt.md](theme-ai-prompt.md)：主题开发 AI 提示词，直接粘贴给 AI 即可按项目规范开发主题
 - [test/README.md](test/README.md)：本地模拟数据和测试流程
 
 ## 社区
@@ -657,6 +702,10 @@ echo <CF_CDN_IP> <你的探针域名> | sudo tee -a /etc/hosts
 </p>
 
 - 微信赞赏：扫码支持
+
+### 合作与推荐
+
+如果你需要粤港澳大湾区的机场接送、商务用车或私人包车服务，可参考 [Hong Kong Chauffeur](https://hkchauffeur.com/)，覆盖香港、深圳、广州、珠海、澳门等地区。
 
 ## 致谢
 

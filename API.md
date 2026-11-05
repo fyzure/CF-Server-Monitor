@@ -28,7 +28,6 @@
   - [0.6 CORS](#06-cors)
 - [1. 探针上报接口](#1-探针上报接口)
   - [1.1](#11-post-update---指标上报agent-入口) [`POST /update`](#11-post-update---指标上报agent-入口) [- 指标上报（Agent 入口）](#11-post-update---指标上报agent-入口)
-  - [1.2](#12-post-updateservice-status---服务状态上报) [`POST /update/service-status`](#12-post-updateservice-status---服务状态上报) [- 服务状态上报](#12-post-updateservice-status---服务状态上报)
 - [2. 公开 API（前端/管理端共用）](#2-公开-api前端管理端共用)
   - [2.1](#21-get-apiconfig---获取站点配置) [`GET /api/config`](#21-get-apiconfig---获取站点配置) [- 获取站点配置](#21-get-apiconfig---获取站点配置)
   - [2.1.1](#211-post-apitheme_options---保存第三方主题配置) [`POST /api/theme_options`](#211-post-apitheme_options---保存第三方主题配置) [- 保存第三方主题配置](#211-post-apitheme_options---保存第三方主题配置)
@@ -38,7 +37,6 @@
   - [2.5](#25-get-apiws---websocket-实时推送) [`GET /api/ws`](#25-get-apiws---websocket-实时推送) [- WebSocket 实时推送](#25-get-apiws---websocket-实时推送)
   - [2.6](#26-get-theme---获取主题商店数据) [`GET /theme`](#26-get-theme---获取主题商店数据) [- 获取主题商店数据](#26-get-theme---获取主题商店数据)
   - [2.7](#27-前端与主题代理) [前端与主题代理](#27-前端与主题代理)
-  - [2.8](#28-get-apiservice-status---读取服务状态) [`GET /api/service-status`](#28-get-apiservice-status---读取服务状态) [- 读取服务状态](#28-get-apiservice-status---读取服务状态)
 - [3. 管理端 API（鉴权）](#3-管理端-api鉴权)
   - [3.1](#31-post-adminapi---管理操作入口) [`POST /admin/api`](#31-post-adminapi---管理操作入口) [- 管理操作入口](#31-post-adminapi---管理操作入口)
   - [3.2](#32-action-login---登录) [`action: login`](#32-action-login---登录) [- 登录](#32-action-login---登录)
@@ -298,7 +296,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
       "cpu_info": "Intel(R) Xeon(R) CPU",
       "cpu_cores": "4",
       "gpu_info": [
-        { "id": "0", "name": "NVIDIA GeForce RTX 3060", "info": 12.5 }
+        { "id": "0", "name": "NVIDIA GeForce RTX 3060", "info": 12.5, "mem_used": 4096, "mem_total": 12288, "sm_clock": 1700, "power": 125.3 }
       ],
       "processes": "256",
       "tcp_conn": "32",
@@ -362,7 +360,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 | `cpu_info`       | string       | -   | 是  | CPU 型号                                      |
 | `cpu_cores`      | string\|number | -   | 是  | 逻辑核心数                                       |
 | ~~`gpu`~~        | number\|null | %   | 否  | ~~独立 GPU 占用字段。~~ **2026-07-26 修订**：旧版探针仍可能发送，但后端没有独立 `gpu` 列，不会持久化，也不会在 API 中返回 |
-| `gpu_info`       | array\|null | - | 否 | 新版格式为 `[{id,name,info}]`；`info` 是占用率。无 GPU 时可为 `null`，入库后会序列化为 JSON 字符串 |
+| `gpu_info`       | array\|null | - | 否 | 新版格式为 `[{id,name,info}]`；`info` 是占用率。元素还可能包含可选键 `mem_used` / `mem_total`（MiB）、`sm_clock`（MHz）、`power`（W），不可获取时省略，后端原样透传。无 GPU 时可为 `null`，入库后会序列化为 JSON 字符串 |
 | `processes`      | string\|number | -   | 是  | 进程数                                         |
 | `tcp_conn`       | string\|number | -   | 是  | TCP 活跃连接数                                   |
 | `udp_conn`       | string\|number | -   | 是  | UDP 套接字数                                    |
@@ -488,30 +486,6 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 1. `POST /update` 的 `metrics_history` 只写入本次请求中最新的一个样本；`wss://.../update` 首条成功指标立即写入一次，后续按服务器 `report_interval` 最多写入一次 D1。
 2. 触发 Durable Object `MetricsBroadcaster` 内部广播，统一发送 `{type:"batchUpdate", ts, updates:[...]}` 格式，前端按样本时间逐个回放。
 3. 写入 `request.cf.country`（或 `cf-ipcountry` Header）作为该条记录的 `region` 字段。~~服务端会统一转大写。~~ **2026-07-26 修订**：当前按原值入库；Cloudflare 的国家代码通常为大写，但自定义回退 Header 不会被规范化。
-
-### 1.2 `POST /update/service-status` - 服务状态上报
-
-用于向服务器详情页的独立“服务状态”区块上报任意服务健康状态。该接口不写入系统性能指标，也不会改变服务器在线判定。
-
-```json
-{
-  "id": "<server-id>",
-  "secret": "<API_SECRET>",
-  "service": "nsmc",
-  "label": "NSMC DataPortal",
-  "state": "operational",
-  "checked_at": 1788878825859,
-  "message": "Session valid"
-}
-```
-
-- `service`：稳定、简短的服务 ID，允许 `a-z / 0-9 / . _ -`，最长 64。
-- `label`：展示名称，最长 80。
-- `state`：`operational | degraded | unavailable | maintenance | auth_required | error`。
-- `checked_at`：秒或毫秒 Unix 时间戳。
-- `message`：可选短说明，最长 240；不得放 Cookie、token、密码等敏感信息。
-- 同一 `id + service` 再次上报会原子覆盖上一条状态。
-- 兼容期内 `POST /update/nsmc-status` 仍可用，并会被映射为 `service=nsmc`。
 
 ***
 
@@ -690,13 +664,13 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 
 | 字段            | 说明                                                                    |
 | ------------- | --------------------------------------------------------------------- |
-| `servers`     | 已合并最新指标的服务器列表（按 `sort_order ASC`），未登录用户**自动过滤** **`is_hidden = '1'`**。每个对象包含后端统一判定的布尔值 `is_online`；若 Worker/DO 已有比 D1 更新的实时样本，会把该样本叠加进服务器对象并将 `last_updated` 推进到该样本时间；同时额外包含 `report_timestamp`（毫秒）表示 Worker 最近收到上报的时间 |
+| `servers`     | 已合并最新指标的服务器列表（按 `sort_order ASC`），未登录用户**自动过滤** **`is_hidden = '1'`** |
 | `latestReportUpdates` | 每台服务器最近一次批量上报的采样回放数据，用于新页面连续回放；来自 Worker/DO 内存状态，保留约 5 分钟，进程重启或 DO 回收后允许为空。REST 响应中的样本统一为 `{ ts, data }`，`data` 按探针批量采样包透传；内置探针默认只在普通采样点上报 `cpu`、`ram_total`、`ram_used`、`swap_total`、`swap_used`、`net_in_speed`、`net_out_speed` |
 | `stats`       | 聚合统计：在线阈值 300 秒（5 分钟无上报视为离线）                                          |
 | `regionStats` | 按 ISO 区域码（大写）统计的服务器数                                                  |
 | `sysConfig`   | 当前站点开关：`show_price`、`show_expire`、`show_tf`、`show_three_net_details`、`display_mode`。主题配置请从 `/api/config` 的 `theme_options` 读取。~~旧版示例中的 `site_title` 不在该对象内。~~（2026-07-26 修订） |
 
-> `/api/servers` 的 `latestReportUpdates` 每次请求都会读取 DO 实时状态，并与当前 Worker isolate 内约 5 分钟的最近上报回放合并。逐节点在线状态由后端统一按 300 秒阈值计算，并写回 `servers[].is_online`；主题应优先使用该字段，避免各自根据冷启动时可能较旧的 `last_updated` 重复推断。若实时样本比 D1 最新行更新，响应还会以 D1 行为底座叠加实时样本已携带的字段，并把 `last_updated` 更新到该样本时间。在线判定本身会同时比较 D1 最新指标时间、实时样本时间和实时 `reportTs`。`servers[].ping` / `servers[].loss` 只在 `sysConfig.show_three_net_details === true` 时从 D1 最近 1 小时历史抽样，并在返回前合并该服务器当前最新 Ping/丢包样本；最终窗口最多 20 个点。主题可从 `/api/config.latency_window` 读取窗口参数。D1 抽样结果在当前 Worker isolate 内缓存约 2 分钟；关闭三网详情时返回空数组且不触发这部分 D1 查询。历史不足、上报中断或某个时间段无数据时不会凭空补值。
+> `/api/servers` 的 `latestReportUpdates` 每次请求都会读取 DO 实时状态，并与当前 Worker isolate 内约 5 分钟的最近上报回放合并。`servers[].ping` / `servers[].loss` 只在 `sysConfig.show_three_net_details === true` 时从 D1 最近 2 小时历史抽样返回，最多 20 个真实样本点；主题可从 `/api/config.latency_window` 读取这两个窗口参数。抽样结果在当前 Worker isolate 内缓存约 5 分钟；关闭三网详情时返回空数组且不触发这部分 D1 查询。抽样点保留真实上报时间，不做固定时间戳对齐，也不会用最近点补齐缺口。
 
 ***
 
@@ -875,7 +849,7 @@ intervalMs = max(10_000, ceil(hours * 60 * 60 * 1000 / long_history_points))
 | ≥ 30  | 3 分钟  |
 | < 30  | 1 分钟  |
 
-**公开/私有站点**：公开站点可匿名查询全部允许的历史范围（最长 7 天）；私有站点仍需通过 JWT 鉴权，未登录时返回 `401`。
+**未登录限制**：`hours > 24` 时强制 `401`。
 
 **数据库升级提示**：当 D1 缺少新字段时返回：
 
@@ -1047,14 +1021,6 @@ ws.onmessage = (ev) => {
 };
 ```
 
-实时上报频率会根据前端订阅层级自适应：
-
-- 没有前端订阅时，Agent 回到服务器配置的 `report_interval`（通常 60/180 秒）。
-- `subscribe=all` 的首页概览使用 10 秒摘要频率，避免首页常驻把所有 Agent 拉到高频上报。
-- `subscribe=<serverId>` 的单机详情页使用该服务器的 `wss_report_interval`（当前通常为 2 秒）。
-
-因此 `wss_report_interval` 表示“详情页实时频率”，不是 24 小时持续上报频率。
-
 ***
 
 ### 2.6 `GET /theme` - 获取主题商店数据
@@ -1097,8 +1063,8 @@ https://raw.githubusercontent.com/huilang-me/CFSM-Theme-Store/refs/heads/main/th
 | Path | 行为 |
 | ---- | ---- |
 | `/`、`/#/`、`/#/server/:id` 等前台路径 | `theme_url` 为空时返回内置主题；配置第三方主题时返回反代后的主题 `index.html` |
-| `/admin` | 始终返回内置默认主题的管理后台入口 |
-| `/admin/` | `302` 跳转到 `/admin#admin` |
+| `/admin` | 始终返回内置默认主题的管理后台入口；无 hash 进入时由前端归一化为 `/admin#/admin` |
+| `/admin/` | `302` 跳转到 `/admin#/admin` |
 | `/assets/*` | 配置或预览第三方主题时反代对应主题 `assets/`；未配置主题时返回 404 |
 | 其他静态路径 | 不走主题反代，由 Workers Static Assets 直接处理，缓存头以 `public/_headers` 为准 |
 
@@ -1124,58 +1090,6 @@ https://github.com/<owner>/<theme-repo>/tree/<commit-or-branch>[/theme-subdir]
 **预览鉴权**：
 
 `/?theme_url=...` 只在已登录管理员通过 `start_theme_preview` 获取临时授权后生效。授权 cookie 有效期 10 分钟；未授权直接访问会返回 `401 Theme preview requires admin login`。
-
-***
-
-### 2.8 `GET /api/service-status` - 读取服务状态
-
-读取当前可见服务器的服务状态。传 `id` 时只返回单台服务器；需要历史时可用 `hours` 读取历史采样：
-
-```http
-GET /api/service-status?id=<server-id>&hours=24
-```
-
-- `hours` 默认 `24`
-- 最小 `1`
-- 最大 `720`（30 天）
-- `history=0`：只返回最新状态，跳过历史查询；适合详情页的周期刷新
-- 历史采样按时间从旧到新返回
-
-```json
-{
-  "hours": 24,
-  "services": [
-    {
-      "id": "<server-id>",
-      "service": "nsmc",
-      "label": "NSMC DataPortal",
-      "state": "operational",
-      "checked_at": 1788878825859,
-      "message": "Session valid",
-      "history": [
-        { "state": "operational", "checked_at": 1788877925859 },
-        { "state": "operational", "checked_at": 1788878825859 }
-      ]
-    }
-  ]
-}
-```
-
-后续刷新不要重复拉整段历史，使用 `since` 只读取新增样本：
-
-```http
-GET /api/service-status?id=<server-id>&since=<last-checked-at-ms>
-```
-
-- `since` 只返回 `checked_at > since` 的历史采样
-- 增量查询走 `(server_id, checked_at)` 索引
-- 完整历史查询复用与 VPS 历史相同的按时间范围缓存策略
-- 页面隐藏时应停止增量请求，恢复可见时补一次
-
-每次 `POST /update/service-status` 在更新 latest 状态的同时，会按
-`server_id + service + checked_at` 幂等追加一条历史采样。历史保留 30 天。
-过期历史与 VPS 历史一样由每周清理任务统一删除，不会在每次状态上报时执行 DELETE。
-前端可自行将超过预期检查周期的记录显示为 stale；服务端不会擅自改写上报状态。
 
 ***
 
@@ -1255,14 +1169,16 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 ```json
 {
   "success": true,
-  "settings": { /* Settings 对象，见 5.4 */ },
+  "settings": { /* Settings 对象（不含 password），并包含 password_configured，见 5.4 */ },
   "api_secret": "<env.API_SECRET>"
 }
 ```
 
+`settings.password` 不会返回；`settings.password_configured` 表示是否已配置独立管理员密码。
+
 > `api_secret` 仅在 `get_settings` 中返回，方便前端展示/复制。
 >
-> ~~`settings` 包含 `jwt_secret`。~~ **2026-07-26 修订**：后端会从返回对象中剔除 `jwt_secret`；其他敏感值（如密码哈希、Cloudflare Token、Turnstile Secret）仍可能存在，必须使用 HTTPS 并限制管理 Token。
+> ~~`settings` 包含 `jwt_secret`。~~ **2026-09-19 修订**：后端会从返回对象中剔除 `jwt_secret`、`password`；其他敏感值（如 Cloudflare Token、Turnstile Secret）仍可能存在，必须使用 HTTPS 并限制管理 Token。
 
 ***
 
@@ -1821,7 +1737,6 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
   "success": true,
   "message": "databaseUpgradeSuccess",
   "results": [
-    { "name": "metrics_history 索引检查", "success": true, "created": false, "message": "..." },
     { "name": "servers 表列更新", "success": true, "added": 5 },
     { "name": "servers 表多余字段清理", "success": true, "cleaned": 30, "message": "..." },
     { "name": "metrics_history 表列更新", "success": true, "added": 14 },
@@ -1831,7 +1746,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 }
 ```
 
-~~升级步骤包括 `metrics_history load -> load_avg` 迁移和 `metrics_history` 写入优化。~~ **2026-07-26 修订**：当前顺序为历史表索引检查、补齐 `servers` 列、清理 `servers` 多余列、补齐 `metrics_history` 列、清理废弃设置、删除弃用的 `metrics_aggregated` 表。
+~~升级步骤包括 `metrics_history load -> load_avg` 迁移和 `metrics_history` 写入优化。~~ **修订**：当前顺序为补齐 `servers` 列、清理 `servers` 多余列、补齐 `metrics_history` 列、清理废弃设置、删除弃用的 `metrics_aggregated` 表。历史查询已统一为结构化主键 id 范围模式，不再创建 `(server_id, timestamp)` 二级索引。
 
 ~~任一步骤抛错时返回 HTTP 500。~~ **2026-07-26 修订**：升级函数会捕获未被子步骤处理的错误并返回 `{ "success": false, "message": "databaseUpgradeFailed", "error": "...", "results": [...] }`；路由仍使用成功响应包装，因此通常为 HTTP `200`。各子步骤本身也会捕获错误，所以顶层 `success: true` 时 `results[]` 仍可能含 `success: false`，调用方必须同时检查两层状态。
 
@@ -1924,16 +1839,16 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 | `processes`                                   | number             | 进程数                       |
 | `tcp_conn`                                    | number             | TCP 连接数                   |
 | `udp_conn`                                    | number             | UDP 套接字数                  |
-| `ping_ct` / `ping_cu` / `ping_cm` / `ping_bd` / `ping_node_1` 至 `ping_node_4` | number\|null\|false | 各运营商及自定义节点延时 (ms)；`false` 表示未配置/未上报，`null` 表示该轮超时/未取到有效 RTT |
-| `loss_ct` / `loss_cu` / `loss_cm` / `loss_bd` / `loss_node_1` 至 `loss_node_4` | number\|null\|false | 各运营商及自定义节点丢包率 (%)；`false` 表示未配置/未上报，`0`–`100` 为有效值；无可用丢包样本时 REST 输出会省略对应延时/丢包字段 |
-| `ping` / `loss`                               | array              | 仅 `/api/servers` 的 `servers[]` 列表项返回，`/api/server` 详情接口不返回；后台开启三网详情时，从 D1 最近 1 小时历史按真实时间抽样并合并当前最新样本，最终最多 20 个点；D1 抽样结果在当前 Worker isolate 内缓存约 2 分钟。关闭三网详情时为空数组且不触发这部分 D1 查询。点格式为 `{ ts, ct, cu, cm, bd }`，其中 `ts` 为真实上报时间，不强制等差对齐 |
+| `ping_ct` / `ping_cu` / `ping_cm` / `ping_bd` / `ping_node_1` 至 `ping_node_4` | number\|null\|false | 各运营商及自定义节点延时 (ms)；`false` 表示未配置/未上报/未取样（不显示），`null` 表示该轮超时/未取到有效 RTT（显示 Timeout） |
+| `loss_ct` / `loss_cu` / `loss_cm` / `loss_bd` / `loss_node_1` 至 `loss_node_4` | number\|null\|false | 各运营商及自定义节点丢包率 (%)；`false` 表示未配置/未上报/未取样（不显示），`null` 表示没有丢包样本，`0`–`100` 是有效值，`100` 配合对应 `ping_*` 的 `null` 表示全超时 |
+| `ping` / `loss`                               | array              | 仅 `/api/servers` 的 `servers[]` 列表项返回，`/api/server` 详情接口不返回；后台开启三网详情时，从 D1 最近 2 小时历史按时间范围抽样最多 20 个真实样本点，当前 Worker isolate 内缓存约 5 分钟；关闭三网详情时为空数组且不触发这部分 D1 查询。点格式为 `{ ts, ct, cu, cm, bd }`，`ct/cu/cm/bd` 分别对应电信、联通、移动、BGP。`ts` 为真实上报时间，不强制等差对齐，也不会用最近点补齐缺口 |
 | `ram_total` / `ram_used`                      | number             | MB                        |
 | `swap_total` / `swap_used`                    | number             | MB                        |
 | `disk_total` / `disk_used`                    | number             | MB                        |
 | `disk`                                        | object             | 磁盘 IO 当前值：`read_bps` / `write_bps` 为 B/s，`read_iops` / `write_iops` 为 ops/s，`await_ms` 为 ms，`util` 为 %；旧探针、旧历史缺失，或 6 个子字段全为 0 时不返回该对象 |
 | `cpu_cores`                                   | number             | 逻辑核心数                     |
 | `cpu_info`                                    | string             | CPU 型号                    |
-| `gpu_info`                                    | array\|string\|null | GPU 列表。实时上报 / WebSocket 可能是 `[{id,name,info}]` 数组；REST 详情和历史接口通常是同结构的 JSON 字符串，其中 `info` 为占用率 |
+| `gpu_info`                                    | array\|string\|null | GPU 列表。实时上报 / WebSocket 可能是 `[{id,name,info}]` 数组；REST 详情和历史接口通常是同结构的 JSON 字符串，其中 `info` 为占用率。元素还可能包含可选键 `mem_used` / `mem_total`（MiB）、`sm_clock`（MHz）、`power`（W），旧探针上报的数据不含这些键 |
 | `arch`                                        | string             | 架构                        |
 | `os`                                          | string             | OS 名称                     |
 | `kernel_version`                              | string             | 内核版本                    |
@@ -1990,7 +1905,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
   turnstile_site_key: string,
   turnstile_secret_key: string,
   username: string,
-  password: string,              // PBKDF2 哈希值；旧版 MD5 哈希会在成功登录后自动升级
+  password: string,              // PBKDF2 哈希值；旧版 MD5 哈希会在成功登录后自动升级；get_settings 不返回此字段
   cloudflare_account_id: string,
   cloudflare_token: string,
   custom_ct: string,             // 电信测速节点 host[:port]
@@ -2000,7 +1915,6 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
   expire_reminder: string, // '0'-'365'; 0 disables expiration reminders
   notification_timezone: string, // IANA timezone；默认 UTC
   expire_notification_time: string, // '0'-'23'；默认 12
-  history_id_optimized: 'true' | 'false',
   servers_optimized: 'true' | 'false'
 }
 ```

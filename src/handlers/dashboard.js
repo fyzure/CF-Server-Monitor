@@ -10,7 +10,6 @@ import {
   getWorkerLatestReportUpdates
 } from '../utils/latestReportCache.js';
 import { markFrontendRealtimeActive } from '../utils/realtimeBroadcastGate.js';
-import { attachServiceStatuses } from './serviceStatus.js';
 import {
   DASHBOARD_LATENCY_WINDOW_HOURS,
   DASHBOARD_LATENCY_WINDOW_POINTS,
@@ -61,7 +60,6 @@ function withoutPrivateServerFields(server) {
   delete item.bandwidth;
   delete item.note;
   delete item.auto_update;
-  delete item.traffic_snapshots;
   return normalizePublicIpFields(item);
 }
 
@@ -95,62 +93,6 @@ function attachLatencyHistoryToServers(servers, latencyHistory) {
     server.ping = window.ping;
     server.loss = window.loss;
   }
-}
-
-const LATENCY_NODE_FIELDS = [
-  ['ct', 'ping_ct', 'loss_ct'],
-  ['cu', 'ping_cu', 'loss_cu'],
-  ['cm', 'ping_cm', 'loss_cm'],
-  ['bd', 'ping_bd', 'loss_bd']
-];
-
-function normalizeLatencyWindowValue(value, metricType) {
-  if (value === false || String(value ?? '').trim().toLowerCase() === 'false') return false;
-  if (value === null || value === undefined || value === '') return null;
-
-  const number = Number(value);
-  if (!Number.isFinite(number)) return null;
-  if (metricType === 'loss') return Math.max(0, Math.min(100, number));
-  return number > 0 ? number : null;
-}
-
-function buildLatestLatencyPoint(server, timestamp, metricType) {
-  const ts = Number(timestamp);
-  if (!Number.isFinite(ts) || ts <= 0) return null;
-
-  const point = { ts };
-  let hasValue = false;
-  for (const [key, pingField, lossField] of LATENCY_NODE_FIELDS) {
-    const field = metricType === 'loss' ? lossField : pingField;
-    const value = normalizeLatencyWindowValue(server?.[field], metricType);
-    if (value === null) continue;
-    point[key] = value;
-    hasValue = true;
-  }
-  return hasValue ? point : null;
-}
-
-function appendLatencyPoint(points, point) {
-  if (!point) return Array.isArray(points) ? points : [];
-  const source = Array.isArray(points) ? points : [];
-  const merged = source
-    .filter(item => Number(item?.ts) !== point.ts)
-    .concat(point)
-    .sort((a, b) => Number(a?.ts || 0) - Number(b?.ts || 0));
-  return merged.slice(-DASHBOARD_LATENCY_WINDOW_POINTS);
-}
-
-export function appendLatestLatencySample(server, timestamp) {
-  if (!server || typeof server !== 'object') return server;
-  server.ping = appendLatencyPoint(
-    server.ping,
-    buildLatestLatencyPoint(server, timestamp, 'ping')
-  );
-  server.loss = appendLatencyPoint(
-    server.loss,
-    buildLatestLatencyPoint(server, timestamp, 'loss')
-  );
-  return server;
 }
 
 async function getDurableRealtimeState(env, serverIds) {
@@ -209,86 +151,6 @@ function mergeLatestReportUpdates(serverIds, durableUpdates, workerUpdates) {
     .filter(Boolean);
 }
 
-export function getLatestRealtimeReportTimestamps(latestReportUpdates) {
-  const timestamps = new Map();
-
-  for (const update of Array.isArray(latestReportUpdates) ? latestReportUpdates : []) {
-    const serverId = String(update?.serverId || '').trim();
-    const reportTs = Number(update?.reportTs ?? update?.report_timestamp);
-    if (!serverId || !Number.isFinite(reportTs) || reportTs <= 0) continue;
-
-    const normalizedReportTs = reportTs < 10000000000 ? reportTs * 1000 : reportTs;
-    const previous = timestamps.get(serverId) || 0;
-    if (normalizedReportTs > previous) timestamps.set(serverId, normalizedReportTs);
-  }
-
-  return timestamps;
-}
-
-export function getLatestRealtimeSamplesByServer(latestReportUpdates) {
-  const latestSamples = new Map();
-
-  for (const update of Array.isArray(latestReportUpdates) ? latestReportUpdates : []) {
-    const serverId = String(update?.serverId || '').trim();
-    if (!serverId || !Array.isArray(update?.samples)) continue;
-
-    for (const rawSample of update.samples) {
-      const sample = normalizeLatestReportSample(rawSample);
-      const sampleTs = Number(sample?.ts || 0);
-      if (!sample || !Number.isFinite(sampleTs) || sampleTs <= 0) continue;
-
-      const normalizedSampleTs = sampleTs < 10000000000 ? sampleTs * 1000 : sampleTs;
-      const previous = latestSamples.get(serverId);
-      if (!previous || normalizedSampleTs > previous.ts) {
-        latestSamples.set(serverId, {
-          ts: normalizedSampleTs,
-          data: sample.data
-        });
-      }
-    }
-  }
-
-  return latestSamples;
-}
-
-function mergeRealtimeSampleIntoServer(server, latestMetrics, realtimeSample) {
-  const latestMetricsTs = Number(latestMetrics?.timestamp || 0);
-  const realtimeSampleTs = Number(realtimeSample?.ts || 0);
-
-  if (latestMetrics) {
-    mergeMetricsIntoServer(server, latestMetrics);
-  }
-
-  if (!realtimeSample || realtimeSampleTs <= latestMetricsTs) {
-    return latestMetricsTs;
-  }
-
-  // 实时批量上报通常只携带一部分指标。叠加到 D1 最新行后再复用统一的
-  // mergeMetricsIntoServer，既能让旧主题拿到新鲜 last_updated，又不会把
-  // 本次未上报的 Ping / 系统信息等字段清成 0。
-  const mergedMetrics = {
-    ...(latestMetrics || {}),
-    ...(realtimeSample.data || {}),
-    timestamp: realtimeSampleTs
-  };
-  mergeMetricsIntoServer(server, mergedMetrics);
-  return realtimeSampleTs;
-}
-
-export function isServerOnlineAt(now, ...timestamps) {
-  const currentTs = Number(now);
-  const onlineTimestamp = Math.max(
-    0,
-    ...timestamps.map(timestamp => {
-      const value = Number(timestamp || 0);
-      return Number.isFinite(value) && value > 0 ? value : 0;
-    })
-  );
-  return Number.isFinite(currentTs)
-    && onlineTimestamp > 0
-    && (currentTs - onlineTimestamp) < 300000;
-}
-
 async function getRealtimeStateForServers(env, serverIds) {
   const normalizedServerIds = Array.from(new Set(
     (Array.isArray(serverIds) ? serverIds : [])
@@ -331,24 +193,12 @@ export async function handleServerAPI(request, env, sys) {
   
   const server = await getServerDetail(env.DB, id, isLoggedIn);
   if (!server) return createNotFoundResponse('Server not found');
-  await attachServiceStatuses(env.DB, [server]);
   
   const [latestMetrics, realtimeState] = await Promise.all([
     getLatestMetrics(env.DB, id, server),
     getRealtimeStateForServers(env, [id])
   ]);
-  const realtimeSample = getLatestRealtimeSamplesByServer(realtimeState.latestReportUpdates)
-    .get(String(id));
-  const latestSampleTs = mergeRealtimeSampleIntoServer(server, latestMetrics, realtimeSample);
-  const realtimeReportTs = getLatestRealtimeReportTimestamps(realtimeState.latestReportUpdates)
-    .get(String(id));
-  if (realtimeReportTs) server.report_timestamp = realtimeReportTs;
-  server.is_online = isServerOnlineAt(
-    Date.now(),
-    latestMetrics?.timestamp,
-    latestSampleTs,
-    realtimeReportTs
-  );
+  mergeMetricsIntoServer(server, latestMetrics);
   server.latestReportUpdates = realtimeState.latestReportUpdates;
   server.sysConfig = {
     long_history_points: Number(normalizeLongHistoryPoints(sys.long_history_points))
@@ -366,7 +216,6 @@ export async function handleServersAPI(request, env, sys) {
   markFrontendRealtimeActive();
   
   const results = (await getAllServers(env.DB, isLoggedIn)).map(withoutPrivateServerFields);
-  await attachServiceStatuses(env.DB, results);
   const shouldIncludeLatencyHistory = sys.show_three_net_details === 'true';
   
   const serverIds = results.map(server => server.id).filter(Boolean);
@@ -378,8 +227,6 @@ export async function handleServersAPI(request, env, sys) {
       : Promise.resolve(new Map())
   ]);
   attachLatencyHistoryToServers(results, latencyHistory);
-  const realtimeReportTimestamps = getLatestRealtimeReportTimestamps(realtimeState.latestReportUpdates);
-  const realtimeSamples = getLatestRealtimeSamplesByServer(realtimeState.latestReportUpdates);
   
   const now = Date.now();
   let globalOnline = 0;
@@ -388,25 +235,13 @@ export async function handleServersAPI(request, env, sys) {
   
   for (const server of results) {
     const latestMetrics = latestMetricsMap.get(server.id);
-    const realtimeReportTs = realtimeReportTimestamps.get(String(server.id)) || 0;
-    const realtimeSample = realtimeSamples.get(String(server.id));
     
     let isOnline = false;
     
     if (latestMetrics) {
-      if (shouldIncludeLatencyHistory) {
-        mergeMetricsIntoServer(server, latestMetrics);
-        appendLatestLatencySample(server, latestMetrics.timestamp);
-      }
+      isOnline = (now - latestMetrics.timestamp) < 300000;
+      mergeMetricsIntoServer(server, latestMetrics);
     }
-    const latestSampleTs = mergeRealtimeSampleIntoServer(server, latestMetrics, realtimeSample);
-    if (realtimeReportTs) server.report_timestamp = realtimeReportTs;
-
-    const latestMetricsTs = Number(latestMetrics?.timestamp || 0);
-    isOnline = isServerOnlineAt(now, latestMetricsTs, latestSampleTs, realtimeReportTs);
-    // 外部主题（包括当前固定的 LuminaPlus 1.2.6）会优先读取该字段。
-    // 必须把后端已经算出的逐节点在线状态写回服务器对象，不能只汇总到 stats。
-    server.is_online = isOnline;
     normalizePublicIpFields(server);
     
     if (isOnline) {

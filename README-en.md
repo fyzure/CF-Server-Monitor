@@ -10,12 +10,12 @@ A lightweight multi-server monitoring dashboard built on Cloudflare Workers, D1,
   <a href="README-en.md">English</a>
 </p>
 
-[![Workers](https://img.shields.io/badge/Workers-2.8.6%20Beta2-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
+[![Workers](https://img.shields.io/badge/Workers-2.8.6%20Stable-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
 [![GitHub Stars](https://img.shields.io/github/stars/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/forks)
 [![License](https://img.shields.io/badge/License-MIT-16a34a?style=flat-square)](#license)
 
-[Live Demo](https://demo.huilang.me/) · [API Reference](API.md) · [Go Agent Guide](https://github.com/huilang-me/cfsm-agent) · [Theme Development](theme-develop.md)
+[Live Demo](https://demo.huilang.me/) · [API Reference](API.md) · [Go Agent Guide](https://github.com/huilang-me/cfsm-agent) · [Theme Development](theme-develop.md) · [Theme AI Prompt](theme-ai-prompt.md)
 
 </div>
 
@@ -23,7 +23,7 @@ A lightweight multi-server monitoring dashboard built on Cloudflare Workers, D1,
 
 CF-Server-Monitor is a server monitoring system designed for Cloudflare Workers. Each server runs an Agent that reports metrics to a Worker. The Worker stores data in D1 and pushes realtime updates through Durable Objects and WebSocket, providing free-hosted, low-maintenance realtime monitoring.
 
-It supports mainstream Linux distributions, Alpine Linux, OpenWrt, macOS, Synology DSM, Feiniu fnOS, Windows, and similar systems.
+It supports mainstream Linux distributions, Alpine Linux, OpenWrt, macOS, Synology DSM, Feiniu fnOS, Windows, and similar systems, and provides Docker image deployment.
 
 Security is stricter by design: the Agent only reports metrics one way, does not provide WebSSH, remote command delivery, or a controller channel, and can run as a non-root user to reduce blast radius.
 
@@ -64,12 +64,12 @@ Compared with traditional controller-style monitoring tools, CF-Server-Monitor i
 | --- | --- |
 | Realtime monitoring | CPU, GPU, memory, swap, disk, disk IO, network, connections, process count, load average, uptime |
 | History | 7-day charts, long-range sampling, realtime network speed, monthly traffic and correction |
-| Network quality | Latency and packet loss tracking for CT, CU, CM, and BGP nodes; when three-net details are enabled, the dashboard samples up to 20 points from the last hour of D1 history, merges the latest Ping sample, and caches the D1 result for 2 minutes |
+| Network quality | Latency and packet loss tracking for CT, CU, CM, and BGP nodes; when three-net details are enabled, the dashboard samples up to 20 real points from the last 2 hours of D1 history and caches them for 5 minutes |
 | Dashboard views | Bar chart, ring chart, table, and map views for desktop and mobile |
 | Admin panel | Server CRUD, drag sorting, hidden servers, import/export, batch delete, database maintenance |
-| Cross-platform Agent | Mainstream Linux, Alpine Linux, OpenWrt, Synology DSM, Feiniu fnOS, FreeBSD, macOS, Windows; Go Agent by default, Shell/PowerShell still available |
+| Cross-platform Agent | Mainstream Linux, Alpine Linux, OpenWrt, Synology DSM, Feiniu fnOS, FreeBSD, macOS, Windows, plus Docker image deployment; Go Agent by default, Shell/PowerShell still available |
 | Realtime push | Durable Objects + WebSocket refresh the UI immediately after Agent reports |
-| Alerts | Offline alerts, recovery notices, expiration reminders, resource load rules, daily/weekly/monthly traffic reports |
+| Alerts | Offline alerts, recovery notices, expiration reminders, resource load rules |
 | Multi-language | Built-in Chinese and English frontend switch; Chinese and English documentation |
 | Multi-site | GitHub Pages static frontend and aggregation of multiple Worker APIs |
 | Widget | iOS Scriptable widget script for quick mobile status checks |
@@ -99,7 +99,7 @@ Core flow:
 
 Recent changes:
 
-- `2.8.6`: Added traffic report feature, WSS frontend subscription 250ms batch report.
+- `2.8.6`: WSS frontend subscription with 250ms batch reporting, added SMTP notification channel, added monthly traffic threshold alert, removed legacy database compatibility, added Docker installation method.
 - `2.8.5`: Added custom Ping node names, ICMP mode, optimized WSS response logic, API interface optimization, and optimized frontend. Also added 4 default Ping nodes.
 - `2.8.4`: Added Agent WSS reporting and active hours. Agents use POST outside selected hours to reduce Do duration, and this requires Agent `v1.0.10+`. Also added account Do usage display with optimized Do broadcast requests when no frontend subscription exists to reduce idle quota consumption, added custom Webhook channel in notification settings, and added frontend WSS timeout configuration.
 - `2.8.3`: Added disk IO metrics, switched the default Agent to Go, and added realtime latency / packet-loss windows.
@@ -229,6 +229,23 @@ loginctl enable-linger username
 
 When uninstalling, select the user that originally installed the Agent. For OpenWrt, Alpine/OpenRC, Synology DSM, and other systems without `systemd --user`, use the matching system command.
 
+### Docker Deployment
+
+The admin copy-install dialog lets you choose Docker as the target system, generating a container command like the one below (server ID, secret, and Worker URL are filled in automatically for the current server; the image tag defaults to `latest` and can be customized in the Agent version field):
+
+```bash
+docker run -d --name cf-probe --restart=unless-stopped --network=host \
+  -v cf-probe-data:/data \
+  -e SERVER_ID=<server-id> -e SECRET='<API_SECRET>' -e WORKER_URL=https://<your-worker>/update \
+  ghcr.io/huilang-me/cfsm-agent:latest
+```
+
+Collect interval, report interval, ping nodes, network interface, traffic reset day, and upload/download correction are pulled dynamically by the Agent from the admin panel via `SERVER_ID`, so they do not need to be repeated in the command; changing the image tag upgrades or rolls back to that version. To remove the container:
+
+```bash
+docker rm -f cf-probe && docker volume rm cf-probe-data
+```
+
 ## Configuration
 
 ### Worker Environment Variables
@@ -285,7 +302,7 @@ The widget shows online status, CPU, memory, disk, monthly traffic, realtime upl
 
 ## Notifications and Alerts
 
-Configure notifications in Admin -> Global Settings -> Notifications. Notification delivery has two channel modes: built-in channels and custom Webhook. When custom Webhook is selected, the backend sends only the Webhook request and does not call the built-in channel.
+Configure notifications in Admin -> Global Settings -> Notifications. Notification delivery has three channel modes: built-in channels, SMTP email, and custom Webhook. When custom Webhook is selected, the backend sends only the Webhook request and does not call the built-in channel.
 
 ### Built-in Channels
 
@@ -302,6 +319,24 @@ Built-in channels are detected from the Bot Token format.
 | ServerChan | `https://sctapi.ftqq.com/<SendKey>.send` or `server:https://example.com/s/<SendKey>.send` | Empty |
 | WxPusher | `https://wxpusher.zjiecode.com/api/send/message/[SPT_xxx]/Hello` | Empty |
 | Gotify | `https://gotify.example.com/message?token=xxx` | Empty |
+
+### SMTP Email
+
+When the SMTP email channel is selected, fill in the SMTP host, port, encryption, username, password, sender and recipients in the settings panel — no manual string assembly needed. The backend serializes them into the `tg_bot_token` field using the `smtp://` prefix protocol and sends plain-text email directly via [`cloudflare-smtp`](https://github.com/Bruol/cloudflare-smtp) (built on `cloudflare:sockets`).
+
+Config format (generated by the frontend; also usable when typing the prefix protocol into the built-in Bot Token field):
+
+```text
+smtp://<username>:<password>@<host>:<port>?from=<sender>&to=<rcpt1,rcpt2>&secure=<auto|tls|starttls>
+```
+
+Notes:
+
+- **Cloudflare Workers permanently blocks outbound port 25.** Only `465` (implicit TLS) and `587` (STARTTLS) work; `secure` is inferred from the port when omitted.
+- Special characters in username/password must be URL-encoded (e.g. `@` as `%40`); the frontend form handles this automatically.
+- QQ / 163 mailboxes require an **SMTP authorization code**, not the login password. Sender defaults to the username when left empty.
+- Only plain-text email is sent (no HTML, attachments or CC). Failed sends retry up to `NOTIFICATION_MAX_RETRIES` times.
+- Deliverability also depends on the mail provider's checks of Cloudflare egress IPs and SPF / DKIM.
 
 ### Custom Webhook
 
@@ -349,7 +384,6 @@ Supported alert types:
 - Offline alert: notify after a node stays offline for the configured delay; send recovery notice when it returns.
 - Expiration reminder: notify daily 1 to 7 days before expiration at the configured notification timezone and expiration notification time, or disable it.
 - Resource alert: define rules for CPU, memory, disk, inbound/outbound network speed, and similar metrics.
-- Traffic reports: when enabled, three lightweight JSON network-counter baselines are maintained in the notification timezone. Daily reports are sent every day, weekly reports on Monday, and monthly reports on the first day. A missing previous baseline is reported as unavailable. Server or Agent restarts may reset interface counters and affect the current period.
 
 Send a test notification before saving.
 
@@ -391,7 +425,10 @@ The project includes a built-in theme and supports:
 - Third-party GitHub tree theme URLs
 - Admin-only theme preview
 
-Third-party themes only proxy `index.html` and `assets/` from the theme repository. The admin panel always uses the built-in theme. See [theme-develop.md](theme-develop.md) for custom theme development.
+Third-party themes only proxy `index.html` and `assets/` from the theme repository. The admin panel always uses the built-in theme. For custom theme development, see:
+
+- [theme-ai-prompt.md](theme-ai-prompt.md): Theme development AI prompt — paste the whole block into an AI coding assistant; includes the core data flow, D1 consumption rules and a pre-delivery checklist (Chinese)
+- [theme-develop.md](theme-develop.md): Full API field reference and auth details
 
 ## Upgrade and Maintenance
 
@@ -465,7 +502,7 @@ After upgrading from older versions to versions with GPU, disk IO, packet loss, 
 | Cron | Description |
 | --- | --- |
 | `*/1 * * * *` | Detect offline nodes/resource alerts every minute |
-| `0 * * * *` | Run hourly combined tasks, including monthly table rotation, old table cleanup, expiration checks, and traffic reports in the configured notification timezone |
+| `0 * * * *` | Run hourly combined tasks, including monthly table rotation, old table cleanup, and expiration checks at the configured notification timezone/hour |
 
 ## Local Development
 
@@ -527,8 +564,6 @@ https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+0+*+*+0 // Weekly mainte
 https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+12+*+*+* // Daily maintenance tasks (for testing)
 ```
 
-
-
 ### API Check
 
 ```bash
@@ -556,6 +591,7 @@ CF-Server-Monitor/
 ├── test/                    # Local tests and mock data tools
 ├── API.md                   # REST / WebSocket API reference
 ├── theme-develop.md         # Third-party theme development
+├── theme-ai-prompt.md       # Theme development AI prompt (paste into AI)
 ├── wrangler.toml            # Local Wrangler configuration
 └── version.json             # Worker / Agent versions
 ```
@@ -592,6 +628,11 @@ If the image URL redirects or goes through a CDN redirect, open the browser deve
 
 Open the Cloudflare D1 database `server-monitor-db`, edit the `setting` table, and update the `password` field in `site_options`. The legacy MD5-compatible value `e10adc3949ba59abbe56e057f20f883e` maps to password `123456`. Log in with it and set a strong password in the admin panel.
 
+
+### Domains not hosted on Cloudflare cannot be bound
+
+You can implement reverse proxying by deploying the [CFSM-PROXY](https://github.com/huilang-me/CFSM-PROXY) Pages project, allowing you to bind domains that are not hosted on Cloudflare.
+
 ### Servers in mainland China cannot report
 
 Binding a custom probe domain to the Worker is recommended. If needed, you can temporarily map the probe domain to a reachable Cloudflare CDN IP in hosts:
@@ -599,6 +640,8 @@ Binding a custom probe domain to the Worker is recommended. If needed, you can t
 ```bash
 echo <CF_CDN_IP> <your-probe-domain> | sudo tee -a /etc/hosts
 ```
+
+If you are using [CFSM-PROXY](https://github.com/huilang-me/CFSM-PROXY), please manually change the `url` parameter in the installation command to the bound domain.
 
 ### Ping values are abnormal or always 1
 
@@ -639,6 +682,7 @@ The frontend may display Hong Kong, Macao, Taiwan, and country/region informatio
 - [API.md](API.md): REST API, WebSocket, auth, error codes, and data structures
 - [https://github.com/huilang-me/cfsm-agent](cfsm-agent): Go Agent configuration, upgrade, logs, and troubleshooting
 - [theme-develop.md](theme-develop.md): Third-party theme development
+- [theme-ai-prompt.md](theme-ai-prompt.md): Theme development AI prompt — paste it into an AI assistant to build themes that follow project rules
 - [test/README.md](test/README.md): Local mock data and testing workflow
 
 ## Community
@@ -655,6 +699,11 @@ If this project is helpful to you, you can support future maintenance through th
 </p>
 
 - WeChat appreciation: scan the QR code
+
+### Partners & Recommendations
+
+If you need airport transfers, business transportation, or private chauffeur services in the Greater Bay Area, you can consider [Hong Kong Chauffeur](https://hkchauffeur.com/), serving Hong Kong, Shenzhen, Guangzhou, Zhuhai, Macau, and other major cities in the region.
+
 
 ## Credits
 

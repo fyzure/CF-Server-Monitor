@@ -113,7 +113,6 @@
           :groups="groups"
           :active-tab="activeTab"
           :selected-api-index="selectedApiIndex"
-          :theme-url="settings.theme_url"
           :latest-agent-version="latestAgentVersion"
           :copied-server-id="copiedServerId"
           :copied-note-server-id="copiedNoteServerId"
@@ -154,6 +153,7 @@
           @upload-favicon="uploadFavicon"
           @send-test-notification="sendTestNotification"
           @query-d1-usage="queryD1Usage"
+          @alert-message="alertMessage = $event"
         />
 
         <DatabasePanel
@@ -586,13 +586,14 @@ import EditServerModal from './components/EditServerModal.vue'
 import BatchEditServersModal from './components/BatchEditServersModal.vue'
 import DeleteServerModal from './components/DeleteServerModal.vue'
 import CopyCommandModal from './components/CopyCommandModal.vue'
-import { adminApi, login, logout as apiLogout, upgradeDatabase, clearHistory, getApiBases, fetchConfig } from '../../utils/api'
-import { hasMultipleApiBases } from '../../utils/config.js'
+import { adminApi, login, logout as apiLogout, upgradeDatabase, clearHistory, fetchConfig } from '../../utils/api'
+import { hasMultipleApiBases, getApiBases } from '../../utils/config.js'
+import { copyTextToClipboard } from '../../utils/clipboard.js'
 import { t, useTranslation } from '../../utils/i18n'
 import { PING_NODE_FIELDS, validatePingNode } from '../../utils/pingNode.js'
 import { normalizeDisplayMode, resolveDisplayMode } from '../../utils/displayMode.js'
 import { applyMikusThemeOptions } from '../../utils/themeOptions.js'
-import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY } from '../../utils/constants.js'
+import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY, STORAGE } from '../../utils/constants.js'
 import { usePasswordVisibility } from '../../composables/usePasswordVisibility'
 import { useTurnstile } from './composables/useTurnstile'
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../../utils/server.js'
@@ -653,11 +654,10 @@ const normalizeTgNotifySetting = (value) => {
   if (value === false || value === 'false' || value === undefined || value === null || value === '') return '0'
 
   const minutes = Number(value)
-  if (Number.isInteger(minutes) && (minutes === 0 || (minutes >= 2 && minutes <= 30))) {
-    return String(minutes)
-  }
-
-  return '0'
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 30) return '0'
+  if (minutes === 0) return '0'
+  // 最小 5 分钟：低于 5 的历史值（如 2、3、4）统一提升到 5
+  return String(Math.max(minutes, 5))
 }
 
 const isTgNotifyEnabled = (value) => normalizeTgNotifySetting(value) !== '0'
@@ -855,19 +855,9 @@ const getDurableObjectsUsageRows = (usage = {}) => ([
     value: `${formatNumber(usage.durableObjectsHttpRequests)} · ${trans.value.billingRatioOneToOne}`
   },
   {
-    key: 'alarm',
-    label: trans.value.durableObjectsAlarmRequests,
-    value: `${formatNumber(usage.durableObjectsAlarmRequests)} · ${trans.value.billingRatioOneToOne}`
-  },
-  {
-    key: 'other',
-    label: trans.value.durableObjectsOtherRequests,
-    value: `${formatNumber(usage.durableObjectsOtherRequests)} · ${trans.value.billingRatioOneToOne}`
-  },
-  {
     key: 'hibernation',
-    label: trans.value.durableObjectsHibernationWebSocketMessages,
-    value: `${formatNumber(usage.durableObjectsHibernationWebSocketMessages ?? usage.durableObjectsHibernationWakeups)} · ${trans.value.billingRatioWebSocketIncoming}`
+    label: trans.value.durableObjectsHibernationWakeups,
+    value: `${formatNumber(usage.durableObjectsHibernationWakeups)} · ${trans.value.billingRatioOneToOne}`
   },
   {
     key: 'inbound-ws',
@@ -950,11 +940,11 @@ const settings = ref({
   tg_notify: '0',
   expire_reminder: '0',
   resource_alert_rules: [],
+  traffic_alert_threshold: 0,
   tg_bot_token: '',
   tg_chat_id: '',
   notification_timezone: 'UTC',
   expire_notification_time: '12',
-  traffic_report_enabled: false,
   notification_webhook_enabled: false,
   notification_webhook_url: '',
   notification_webhook_method: 'POST',
@@ -963,12 +953,14 @@ const settings = ref({
   notification_webhook_body: '{\n  "title": "{{emoji}} {{event}}",\n  "content": "{{notification}}"\n}',
   notification_template: '{{emoji}}【CF Server Monitor】{{event}}\n\n{{message}}\n\n{{time}}',
   turnstile_enabled: false,
+  turnstile_login_enabled: false,
   turnstile_site_key: '',
   turnstile_secret_key: '',
   cloudflare_account_id: '',
   cloudflare_token: '',
   jwt_secret: '',
   username: '',
+  password_configured: false,
   password: '',
   confirm_password: '',
   custom_ct: '',
@@ -1005,7 +997,7 @@ const toggleAdminPasswordChange = () => {
 }
 
 const { visibility: passwordVisible, toggle: togglePassword } = usePasswordVisibility([
-  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
+  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
 ])
 
 const {
@@ -1032,6 +1024,7 @@ const editForm = ref({
   expire_date: '',
   traffic_limit: '',
   traffic_calc_type: 'total',
+  traffic_alert_percent: null,
   interface: '',
   reset_day: 1,
   collect_interval: 0,
@@ -1062,6 +1055,7 @@ const createBatchEditDefaults = () => ({
   expire_date: '',
   traffic_limit: '',
   traffic_calc_type: 'total',
+  traffic_alert_percent: null,
   interface: '',
   reset_day: 1,
   collect_interval: 0,
@@ -1180,33 +1174,16 @@ const getPingNodeValidation = (source) => {
 
 const buildPingNodeError = (field) => `${getPingNodeLabel(field)}: ${trans.value.invalidPingNodeFormat}`
 
-const copyTextToClipboard = async (text) => {
-  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text)
-      return
-    } catch (e) {
-      // Fall back to the textarea path below.
-    }
-  }
-
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.setAttribute('readonly', '')
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  document.body.appendChild(textarea)
-  textarea.select()
-  document.execCommand('copy')
-  document.body.removeChild(textarea)
-}
-
 const copyServerNote = async (server) => {
   const note = String(server?.note || '')
   if (!note.trim()) return
 
   try {
-    await copyTextToClipboard(note)
+    const copied = await copyTextToClipboard(note)
+    if (!copied) {
+      alertMessage.value = trans.value.httpsRequired
+      return
+    }
     copiedNoteServerId.value = server.id
     setTimeout(() => {
       if (copiedNoteServerId.value === server.id) {
@@ -1223,7 +1200,11 @@ const copyServerSpec = async ({ key, text } = {}) => {
   if (!key || !value || value === '-') return
 
   try {
-    await copyTextToClipboard(value)
+    const copied = await copyTextToClipboard(value)
+    if (!copied) {
+      alertMessage.value = trans.value.httpsRequired
+      return
+    }
     copiedSpecKey.value = key
     setTimeout(() => {
       if (copiedSpecKey.value === key) {
@@ -1285,8 +1266,8 @@ const logout = async () => {
 }
 
 const checkLoginStatus = () => {
-  const token = localStorage.getItem('jwt_token')
-  return !!token
+  const token = localStorage.getItem(STORAGE.JWT_TOKEN)
+  return !!token || appConfig?.authorization === true
 }
 
 const initAdmin = async () => {
@@ -1294,7 +1275,7 @@ const initAdmin = async () => {
   if (hasCreds) {
     isLoggedIn.value = true
     syncApiIndexQuery()
-    const savedTurnstileToken = localStorage.getItem('turnstile_token')
+    const savedTurnstileToken = localStorage.getItem(STORAGE.TURNSTILE_TOKEN)
     if (savedTurnstileToken) {
       turnstileToken.value = savedTurnstileToken
     }
@@ -1400,11 +1381,11 @@ const loadSettings = async () => {
         tg_notify: normalizeTgNotifySetting(settingsData.tg_notify),
         expire_reminder: normalizeExpireReminderSetting(settingsData.expire_reminder),
         resource_alert_rules: normalizeResourceAlertRulesSetting(settingsData.resource_alert_rules),
+        traffic_alert_threshold: Number(settingsData.traffic_alert_threshold) || 0,
         tg_bot_token: settingsData.tg_bot_token || '',
         tg_chat_id: settingsData.tg_chat_id || '',
         notification_timezone: normalizeNotificationTimezoneSetting(settingsData.notification_timezone),
         expire_notification_time: normalizeExpireNotificationTimeSetting(settingsData.expire_notification_time),
-        traffic_report_enabled: settingsData.traffic_report_enabled === 'true' || settingsData.traffic_report_enabled === true,
         notification_webhook_enabled: settingsData.notification_webhook_enabled === 'true' || settingsData.notification_webhook_enabled === true,
         notification_webhook_url: settingsData.notification_webhook_url || '',
         notification_webhook_method: String(settingsData.notification_webhook_method || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST',
@@ -1420,6 +1401,7 @@ const loadSettings = async () => {
         cloudflare_token: settingsData.cloudflare_token || '',
         jwt_secret: '',
         username: settingsData.username || '',
+        password_configured: settingsData.password_configured === true,
         password: '',
         confirm_password: '',
         custom_ct: settingsData.custom_ct || '',
@@ -1437,7 +1419,7 @@ const loadSettings = async () => {
         csp_api: settingsData.csp_api || ''
       }
       applyMikusThemeOptions(settingsData.theme_options)
-      changeAdminPassword.value = !String(settings.value.username || '').trim()
+      changeAdminPassword.value = !settings.value.password_configured || !String(settings.value.username || '').trim()
       apiSecret.value = data.api_secret || ''
     }
   } catch (e) {
@@ -1506,6 +1488,12 @@ const saveSettings = async () => {
     settings.value.confirm_password.length > 0
   )
 
+  if (!settings.value.password_configured && !shouldChangePassword) {
+    changeAdminPassword.value = true
+    validationError.value = trans.value.passwordRequired
+    return
+  }
+
   if (shouldChangePassword) {
     if (settings.value.password !== settings.value.confirm_password) {
       validationError.value = trans.value.passwordMismatch
@@ -1524,8 +1512,7 @@ const saveSettings = async () => {
     }
   }
 
-  const isTrafficReportEnabled = settings.value.traffic_report_enabled
-  if (isTgNotifyEnabled(settings.value.tg_notify) || isExpireReminderEnabled(settings.value.expire_reminder) || isResourceAlertEnabled(settings.value.resource_alert_rules) || isTrafficReportEnabled) {
+  if (isTgNotifyEnabled(settings.value.tg_notify) || isExpireReminderEnabled(settings.value.expire_reminder) || isResourceAlertEnabled(settings.value.resource_alert_rules)) {
     if (isNotificationWebhookEnabled()) {
       if (!settings.value.notification_webhook_url || settings.value.notification_webhook_url.trim().length === 0) {
         validationError.value = trans.value.notificationWebhookUrlRequired || 'Webhook URL is required'
@@ -1553,6 +1540,10 @@ const saveSettings = async () => {
     const cspStaticValid = settingsPanelRef.value.validateCspField('csp_static')
     const cspApiValid = settingsPanelRef.value.validateCspField('csp_api')
     if (!cspStaticValid || !cspApiValid) {
+      return
+    }
+    if (!settingsPanelRef.value.validateSmtpFields()) {
+      validationError.value = trans.value.smtpConfigInvalid || 'SMTP configuration is incomplete, please check the SMTP settings'
       return
     }
   }
@@ -1587,11 +1578,11 @@ const saveSettings = async () => {
       tg_notify: normalizeTgNotifySetting(settings.value.tg_notify),
       expire_reminder: normalizeExpireReminderSetting(settings.value.expire_reminder),
       resource_alert_rules: normalizeResourceAlertRulesSetting(settings.value.resource_alert_rules),
+      traffic_alert_threshold: String(Math.max(0, Math.min(100, Number(settings.value.traffic_alert_threshold) || 0))),
       tg_bot_token: settings.value.tg_bot_token,
       tg_chat_id: settings.value.tg_chat_id,
       notification_timezone: normalizeNotificationTimezoneSetting(settings.value.notification_timezone),
       expire_notification_time: normalizeExpireNotificationTimeSetting(settings.value.expire_notification_time),
-      traffic_report_enabled: settings.value.traffic_report_enabled ? 'true' : 'false',
       notification_webhook_enabled: settings.value.notification_webhook_enabled ? 'true' : 'false',
       notification_webhook_url: settings.value.notification_webhook_url,
       notification_webhook_method: settings.value.notification_webhook_method === 'GET' ? 'GET' : 'POST',
@@ -1647,6 +1638,7 @@ const saveSettings = async () => {
     saving.value = false
   }
 }
+
 
 const loadServers = async () => {
   try {
@@ -1882,6 +1874,16 @@ const getCustomInstallCommand = () => {
     const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.ps1')
     return `$script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script ${params.join(' ')}`
   }
+  if (targetOs.value === 'docker') {
+    const safeTag = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(version) ? version : 'latest'
+    const image = `ghcr.io/huilang-me/cfsm-agent:${safeTag}`
+    return [
+      'docker run -d --name cf-probe --restart=unless-stopped --network=host \\',
+      '  -v cf-probe-data:/data \\',
+      `  -e SERVER_ID=${quotePosixShellArg(copyServerId.value)} -e SECRET=${quotePosixShellArg(apiSecret.value)} -e WORKER_URL=${quotePosixShellArg(`${HOST}/update`)} \\`,
+      `  ${image}`
+    ].join('\n')
+  }
   const params = ['install']
   if (proxy) params.push(quotePosixShellArg(`--install-ghproxy=${proxy}`))
   if (version) params.push(quotePosixShellArg(`--install-version=${version}`))
@@ -1912,15 +1914,11 @@ const getCustomInstallCommand = () => {
 }
 
 const copyCustomCmd = async () => {
-  if (window.location.protocol !== 'https:') {
+  const cmd = getCustomInstallCommand()
+  const copied = await copyTextToClipboard(cmd)
+  if (!copied) {
     alertMessage.value = trans.value.httpsRequired
     return
-  }
-  const cmd = getCustomInstallCommand()
-  try {
-    await navigator.clipboard.writeText(cmd)
-  } catch (e) {
-    document.execCommand('copy')
   }
 
   copiedCmd.value = true
@@ -1943,16 +1941,24 @@ const openEditModalFromCopy = () => {
 
 const copyUninstallCmd = async () => {
   const cmd = getUninstallCommand()
-  try {
-    await navigator.clipboard.writeText(cmd)
-  } catch (e) {
-    document.execCommand('copy')
+  const copied = await copyTextToClipboard(cmd)
+  if (!copied) {
+    alertMessage.value = trans.value.httpsRequired
+    return
   }
 
   uninstallCopied.value = true
   setTimeout(() => {
     uninstallCopied.value = false
   }, 1500)
+}
+
+// 逐台月流量告警阈值：空/未设置 → null（跟随全局）；否则夹取 0..100 整数（0 = 该服务器显式关闭）
+const normalizeTrafficAlertPercentField = (value) => {
+  if (value === '' || value === null || value === undefined) return null
+  const n = parseInt(value, 10)
+  if (!Number.isFinite(n)) return null
+  return Math.max(0, Math.min(100, n))
 }
 
 const createEditFormFromServer = (server) => ({
@@ -1969,6 +1975,7 @@ const createEditFormFromServer = (server) => ({
     expire_date: server.expire_date || '',
     traffic_limit: server.traffic_limit || '',
     traffic_calc_type: server.traffic_calc_type || 'total',
+    traffic_alert_percent: server.traffic_alert_percent ?? '',
     interface: server.interface || '',
     reset_day: server.reset_day ?? 1,
     collect_interval: server.collect_interval ?? 0,
@@ -2054,6 +2061,7 @@ const buildEditPayloadFromForm = (form) => {
       expire_date: normalizedExpireDate,
       traffic_limit: form.traffic_limit,
       traffic_calc_type: form.traffic_calc_type,
+      traffic_alert_percent: normalizeTrafficAlertPercentField(form.traffic_alert_percent),
       interface: form.interface,
       reset_day: form.reset_day,
       collect_interval: form.collect_interval,
@@ -2120,6 +2128,7 @@ const saveEdit = async () => {
     expire_date: normalizedExpireDate,
     traffic_limit: editForm.value.traffic_limit,
     traffic_calc_type: editForm.value.traffic_calc_type,
+    traffic_alert_percent: normalizeTrafficAlertPercentField(editForm.value.traffic_alert_percent),
     interface: editForm.value.interface,
     reset_day: editForm.value.reset_day,
     collect_interval: editForm.value.collect_interval,
@@ -2447,6 +2456,9 @@ const queryD1Usage = async () => {
 
 const sendTestNotification = async () => {
   if (testNotificationLoading.value) return
+  if (settingsPanelRef.value && !settingsPanelRef.value.validateSmtpFields()) {
+    return
+  }
   testNotificationLoading.value = true
   try {
     const result = await adminApiForSite({

@@ -243,6 +243,54 @@
         </div>
       </div>
 
+      <div class="chart-card" :class="{ 'full-width': isChartExpanded('gpuMem') }" v-show="hasGpuMemData">
+        <div class="chart-card-header">
+          <span class="chart-title">
+            <span class="chart-title-icon">▸</span>
+            {{ trans.gpuMemory || 'GPU Memory' }}
+          </span>
+          <div class="chart-header-actions">
+            <span class="chart-current-value">{{ gpuMemText }}</span>
+            <ChartExpandButton :expanded="isChartExpanded('gpuMem')" @toggle="toggleChartExpanded('gpuMem')" />
+          </div>
+        </div>
+        <div class="chart-body">
+          <canvas ref="gpuMemChartRef"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-card" :class="{ 'full-width': isChartExpanded('gpuClock') }" v-show="hasGpuClockData">
+        <div class="chart-card-header">
+          <span class="chart-title">
+            <span class="chart-title-icon">▸</span>
+            {{ trans.gpuClock || 'GPU SM Clock' }}
+          </span>
+          <div class="chart-header-actions">
+            <span class="chart-current-value">{{ gpuClockText }}</span>
+            <ChartExpandButton :expanded="isChartExpanded('gpuClock')" @toggle="toggleChartExpanded('gpuClock')" />
+          </div>
+        </div>
+        <div class="chart-body">
+          <canvas ref="gpuClockChartRef"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-card" :class="{ 'full-width': isChartExpanded('gpuPower') }" v-show="hasGpuPowerData">
+        <div class="chart-card-header">
+          <span class="chart-title">
+            <span class="chart-title-icon">▸</span>
+            {{ trans.gpuPower || 'GPU Power' }}
+          </span>
+          <div class="chart-header-actions">
+            <span class="chart-current-value">{{ gpuPowerText }}</span>
+            <ChartExpandButton :expanded="isChartExpanded('gpuPower')" @toggle="toggleChartExpanded('gpuPower')" />
+          </div>
+        </div>
+        <div class="chart-body">
+          <canvas ref="gpuPowerChartRef"></canvas>
+        </div>
+      </div>
+
       <div class="chart-card" :class="{ 'full-width': isChartExpanded('proc') }">
         <div class="chart-card-header">
           <span class="chart-title">
@@ -318,34 +366,6 @@
         </div>
       </div>
     </div>
-
-    <section v-if="serviceStatusRows.length" class="service-status-panel" aria-label="Service status">
-      <div class="service-status-header">
-        <div>
-          <div class="service-status-title">{{ currentLang === 'en' ? 'Service status' : '服务状态' }}</div>
-          <div class="service-status-summary">{{ serviceStatusSummary }}</div>
-        </div>
-        <span class="service-status-overall" :data-state="serviceStatusOverallState">
-          <span class="service-status-dot"></span>
-          {{ serviceStatusOverallLabel }}
-        </span>
-      </div>
-      <div class="service-status-list">
-        <div v-for="item in serviceStatusRows" :key="`${item.id}:${item.service}`" class="service-status-row">
-          <div class="service-status-name-block">
-            <span class="service-status-dot" :data-state="item.displayState"></span>
-            <div>
-              <div class="service-status-name">{{ item.label }}</div>
-              <div v-if="item.message" class="service-status-message">{{ item.message }}</div>
-            </div>
-          </div>
-          <div class="service-status-meta">
-            <span class="service-status-state" :data-state="item.displayState">{{ item.stateLabel }}</span>
-            <span class="service-status-age" :title="item.checkedTitle">{{ item.ageText }}</span>
-          </div>
-        </div>
-      </div>
-    </section>
     </template>
 
     <Footer />
@@ -382,11 +402,11 @@ import TerminalHeader from '../components/TerminalHeader.vue'
 import Footer from '../components/Footer.vue'
 import OsIcon from '../components/OsIcon.vue'
 import LiveConnectionTimeoutModal from '../components/LiveConnectionTimeoutModal.vue'
-import { fetchServerDetail, fetchAllHistory, fetchConfig, fetchServiceStatuses, formatBytes, createLiveSocket, getFlagRegionCode, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
+import { fetchServerDetail, fetchAllHistory, fetchConfig, formatBytes, createLiveSocket, getFlagRegionCode, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
+import { isAdminLoggedIn } from '../utils/http'
 import { getTrafficUsageBytes } from '../composables/useServerCardData'
 import { getPublicAssetUrl } from '../utils/config.js'
 import Chart from 'chart.js/auto'
-import 'chartjs-adapter-date-fns'
 import { t, currentLang, useTranslation } from '../utils/i18n'
 import { CHART, HISTORY } from '../utils/constants'
 import { formatDateTime, normalizeTimestamp as normalizeMetricTimestamp } from '../utils/time.js'
@@ -426,75 +446,8 @@ const showLoginModal = ref(false)
 const showLiveTimeoutModal = ref(false)
 const frontendWsTimeoutMinutes = ref(0)
 const loading = ref(true)
-const serviceStatuses = ref([])
-const serviceStatusNow = ref(Date.now())
-let serviceStatusRefreshInterval = null
-let serviceStatusClockInterval = null
 
 const trans = useTranslation()
-
-const serviceStatusRows = computed(() => {
-  const zh = currentLang.value !== 'en'
-  const labels = {
-    operational: zh ? '运行正常' : 'Operational',
-    degraded: zh ? '性能下降' : 'Degraded',
-    unavailable: zh ? '不可用' : 'Unavailable',
-    maintenance: zh ? '维护中' : 'Maintenance',
-    auth_required: zh ? '需要登录' : 'Login required',
-    error: zh ? '检查异常' : 'Check error',
-    stale: zh ? '状态过期' : 'Stale'
-  }
-  return serviceStatuses.value.map(item => {
-    const checkedAt = normalizeMetricTimestamp(item?.checked_at, 0)
-    const ageMs = checkedAt ? Math.max(0, serviceStatusNow.value - checkedAt) : Number.POSITIVE_INFINITY
-    const stale = !checkedAt || ageMs > 45 * 60 * 1000
-    const rawState = String(item?.state || 'error').toLowerCase()
-    const displayState = stale ? 'stale' : rawState
-    const seconds = checkedAt ? Math.floor(ageMs / 1000) : 0
-    let ageText = zh ? '无检查时间' : 'No check time'
-    if (checkedAt && seconds < 90) ageText = zh ? '刚刚检查' : 'Checked just now'
-    else if (checkedAt && seconds < 3600) ageText = zh ? `${Math.floor(seconds / 60)} 分钟前` : `${Math.floor(seconds / 60)}m ago`
-    else if (checkedAt) ageText = zh ? `${Math.floor(seconds / 3600)} 小时前` : `${Math.floor(seconds / 3600)}h ago`
-    return {
-      ...item,
-      displayState,
-      stateLabel: labels[displayState] || labels.error,
-      ageText,
-      checkedTitle: checkedAt ? new Date(checkedAt).toLocaleString() : ''
-    }
-  })
-})
-
-const serviceStatusOverallState = computed(() => {
-  if (!serviceStatusRows.value.length) return 'unknown'
-  if (serviceStatusRows.value.every(item => item.displayState === 'operational')) return 'operational'
-  if (serviceStatusRows.value.some(item => ['unavailable', 'error', 'stale'].includes(item.displayState))) return 'unavailable'
-  return 'degraded'
-})
-
-const serviceStatusOverallLabel = computed(() => {
-  const zh = currentLang.value !== 'en'
-  if (serviceStatusOverallState.value === 'operational') return zh ? '所有服务正常' : 'All systems operational'
-  if (serviceStatusOverallState.value === 'degraded') return zh ? '部分服务需要关注' : 'Some systems need attention'
-  return zh ? '存在服务异常' : 'Service issues detected'
-})
-
-const serviceStatusSummary = computed(() => {
-  const zh = currentLang.value !== 'en'
-  return zh
-    ? `最近一次健康检查 · ${serviceStatusRows.value.length} 个服务`
-    : `Latest health checks · ${serviceStatusRows.value.length} service${serviceStatusRows.value.length === 1 ? '' : 's'}`
-})
-
-const refreshServiceStatus = async () => {
-  if (typeof document !== 'undefined' && document.hidden) return
-  try {
-    serviceStatuses.value = await fetchServiceStatuses(serverId, apiIndex.value)
-    serviceStatusNow.value = Date.now()
-  } catch (e) {
-    console.log('[INFO] Service status refresh pending...', e)
-  }
-}
 
 const ChartExpandButton = {
   props: {
@@ -648,6 +601,46 @@ const gpuPercentText = computed(() => {
   return list.map(g => formatUtil(g.info)).join(' / ')
 })
 
+const gpuDetailValue = (g, field) => {
+  if (!g) return null
+  const v = parseFloat(g[field])
+  return Number.isNaN(v) ? null : v
+}
+
+// 旧版 Agent 不上报这些扩展字段，缺失时隐藏对应图表
+const hasGpuMemData = computed(() => gpuInfoList.value.some(g => gpuDetailValue(g, 'mem_used') !== null))
+const hasGpuClockData = computed(() => gpuInfoList.value.some(g => gpuDetailValue(g, 'sm_clock') !== null))
+const hasGpuPowerData = computed(() => gpuInfoList.value.some(g => gpuDetailValue(g, 'power') !== null))
+
+const gpuMemText = computed(() => {
+  const list = gpuInfoList.value
+  if (list.length === 0) return 'N/A'
+  return list.map(g => {
+    const used = gpuDetailValue(g, 'mem_used')
+    if (used === null) return 'N/A'
+    const total = gpuDetailValue(g, 'mem_total')
+    return total !== null ? `${formatBytes(used * 1024 * 1024)} / ${formatBytes(total * 1024 * 1024)}` : formatBytes(used * 1024 * 1024)
+  }).join(' / ')
+})
+
+const gpuClockText = computed(() => {
+  const list = gpuInfoList.value
+  if (list.length === 0) return 'N/A'
+  return list.map(g => {
+    const v = gpuDetailValue(g, 'sm_clock')
+    return v === null ? 'N/A' : `${Math.round(v)} MHz`
+  }).join(' / ')
+})
+
+const gpuPowerText = computed(() => {
+  const list = gpuInfoList.value
+  if (list.length === 0) return 'N/A'
+  return list.map(g => {
+    const v = gpuDetailValue(g, 'power')
+    return v === null ? 'N/A' : `${v.toFixed(1)} W`
+  }).join(' / ')
+})
+
 const ramPercent = computed(() => {
   if (server.value.ram_total > 0) {
     return ((server.value.ram_used / server.value.ram_total) * 100).toFixed(2)
@@ -680,6 +673,9 @@ const expireDaysText = computed(() => {
 
 const cpuChartRef = ref(null)
 const gpuChartRef = ref(null)
+const gpuMemChartRef = ref(null)
+const gpuClockChartRef = ref(null)
+const gpuPowerChartRef = ref(null)
 const ramChartRef = ref(null)
 const diskChartRef = ref(null)
 const diskIoChartRef = ref(null)
@@ -923,9 +919,28 @@ const ds = (label, color, opts = {}) => ({
 
 const GPU_COLORS = ['#ff7b72', '#79c0ff', '#d2a8ff', '#7ee787', '#ffa657', '#ff7b72', '#56d4dd', '#e3b341']
 
+const GPU_DETAIL_CHART_KEYS = ['gpu', 'gpuMem', 'gpuClock', 'gpuPower']
+
+const GPU_CHART_FIELD = {
+  gpu: 'info',
+  gpuMem: 'mem_used',
+  gpuClock: 'sm_clock',
+  gpuPower: 'power'
+}
+
+const gpuFieldAccessor = (gpuId, chartKey) => (d) => {
+  const list = parseGpuInfo(d.gpu_info)
+  const found = list.find(g => String(g.id) === String(gpuId))
+  if (!found) return null
+  return gpuDetailValue(found, GPU_CHART_FIELD[chartKey])
+}
+
 const CHART_DEFS = [
   { key: 'cpu', ref: () => cpuChartRef.value, datasets: [ds('CPU', '#00d4aa', { fill: true })], unit: '%' },
   { key: 'gpu', ref: () => gpuChartRef.value, datasets: [], unit: '%', legend: true },
+  { key: 'gpuMem', ref: () => gpuMemChartRef.value, datasets: [], legend: true, tickFormat: (v) => formatBytes(v * 1024 * 1024) },
+  { key: 'gpuClock', ref: () => gpuClockChartRef.value, datasets: [], unit: ' MHz', legend: true },
+  { key: 'gpuPower', ref: () => gpuPowerChartRef.value, datasets: [], unit: ' W', legend: true },
   { key: 'ram', ref: () => ramChartRef.value, datasets: [ds('Memory', '#b392f0', { fill: true }), ds('Swap', '#ffb870', { fill: true })], unit: '%', legend: true },
   { key: 'disk', ref: () => diskChartRef.value, datasets: [ds('Disk', '#39d2c0', { fill: true })], unit: '%' },
   {
@@ -993,23 +1008,28 @@ const syncProbeChartVisibility = () => {
 let lastGpuSignature = ''
 
 const rebuildGpuChartDatasets = () => {
-  const chart = charts.gpu
-  if (!chart) return
   const list = gpuInfoList.value
   const signature = list.map(g => String(g.id ?? '')).join(',')
   if (signature === lastGpuSignature) return
   lastGpuSignature = signature
 
-  const newDatasets = list.map((g, i) => {
-    const dataset = ds(g.name || `GPU ${i}`, GPU_COLORS[i % GPU_COLORS.length], { fill: true })
-    dataset.gpuId = String(g.id ?? i)
-    return dataset
-  })
-  if (newDatasets.length === 0) {
-    newDatasets.push(ds('GPU', '#ff7b72', { fill: true }))
+  for (const chartKey of GPU_DETAIL_CHART_KEYS) {
+    const chart = charts[chartKey]
+    if (!chart) continue
+    let newDatasets = list.map((g, i) => {
+      const opts = chartKey === 'gpuMem'
+        ? { fill: true, formatValue: (v) => formatBytes(v * 1024 * 1024) }
+        : { fill: true }
+      const dataset = ds(g.name || `GPU ${i}`, GPU_COLORS[i % GPU_COLORS.length], opts)
+      dataset.gpuId = String(g.id ?? i)
+      return dataset
+    })
+    if (newDatasets.length === 0) {
+      newDatasets.push(ds('GPU', '#ff7b72', { fill: true }))
+    }
+    chart.data.datasets = newDatasets
+    chart.update('none')
   }
-  chart.data.datasets = newDatasets
-  chart.update('none')
 }
 
 const getCssVar = (name, fallback) => {
@@ -1355,19 +1375,15 @@ const loadAllHistory = async (hours) => {
       }, 0)
       updateChartDataset(charts.cpu, 0, allData, fieldAccessor('cpu', true))
       rebuildGpuChartDatasets()
-      for (let i = 0; i < charts.gpu.data.datasets.length; i++) {
-        const dataset = charts.gpu.data.datasets[i]
-        const gpuId = dataset.gpuId
-        const accessor = gpuId
-          ? (d) => {
-              const list = parseGpuInfo(d.gpu_info)
-              const found = list.find(g => String(g.id) === String(gpuId))
-              if (!found) return null
-              const val = parseFloat(found.info)
-              return Number.isNaN(val) ? null : val
-            }
-          : () => null
-        updateChartDataset(charts.gpu, i, allData, accessor)
+      for (const chartKey of GPU_DETAIL_CHART_KEYS) {
+        const chart = charts[chartKey]
+        if (!chart) continue
+        for (let i = 0; i < chart.data.datasets.length; i++) {
+          const dataset = chart.data.datasets[i]
+          const gpuId = dataset.gpuId
+          const accessor = gpuId ? gpuFieldAccessor(gpuId, chartKey) : () => null
+          updateChartDataset(chart, i, allData, accessor)
+        }
       }
       updateChartDataset(charts.ram, 0, allData, percentAccessor('ram_used', 'ram_total'))
       updateChartDataset(charts.ram, 1, allData, percentAccessor('swap_used', 'swap_total'))
@@ -1671,15 +1687,19 @@ const appendDiskIoChart = (data, dataTimestamp) => {
 const appendReportCharts = (data, dataTimestamp) => {
   rebuildGpuChartDatasets()
   const latestGpuList = parseGpuInfo(data.gpu_info)
-  for (let i = 0; i < charts.gpu.data.datasets.length; i++) {
-    const dataset = charts.gpu.data.datasets[i]
-    const gpuId = dataset.gpuId
-    const found = latestGpuList.find(g => String(g.id) === String(gpuId))
-    const gpuVal = found ? found.info : null
-    if (gpuVal === null || gpuVal === undefined) {
-      appendDataToChart(charts.gpu, i, dataTimestamp, null, false, true)
-    } else {
-      appendDataToChart(charts.gpu, i, dataTimestamp, gpuVal)
+  for (const chartKey of GPU_DETAIL_CHART_KEYS) {
+    const chart = charts[chartKey]
+    if (!chart) continue
+    for (let i = 0; i < chart.data.datasets.length; i++) {
+      const dataset = chart.data.datasets[i]
+      const gpuId = dataset.gpuId
+      const found = latestGpuList.find(g => String(g.id) === String(gpuId))
+      const gpuVal = found ? gpuDetailValue(found, GPU_CHART_FIELD[chartKey]) : null
+      if (gpuVal === null || gpuVal === undefined) {
+        appendDataToChart(chart, i, dataTimestamp, null, false, true)
+      } else {
+        appendDataToChart(chart, i, dataTimestamp, gpuVal)
+      }
     }
   }
   const diskPercent = (parseFloat(data.disk_total) > 0) ? (parseFloat(data.disk_used) / parseFloat(data.disk_total)) * 100 : 0
@@ -1772,6 +1792,10 @@ const fetchCurrentStatus = async (incomingData, options = {}) => {
 
 const setTimeRange = (hours) => {
   clearLatestReportReplayTimers()
+  if (hours > 24 && !isAdminLoggedIn()) {
+    showLoginModal.value = true
+    return
+  }
   currentHours.value = hours
   loadAllHistory(hours)
 }
@@ -1793,7 +1817,7 @@ const initChartsOnMount = async () => {
 
   await nextTick()
   
-  const allRefsReady = cpuChartRef.value && gpuChartRef.value && ramChartRef.value && diskChartRef.value && diskIoChartRef.value &&
+  const allRefsReady = cpuChartRef.value && gpuChartRef.value && gpuMemChartRef.value && gpuClockChartRef.value && gpuPowerChartRef.value && ramChartRef.value && diskChartRef.value && diskIoChartRef.value &&
     netChartRef.value && procChartRef.value && connChartRef.value && pingChartRef.value && lossChartRef.value && loadChartRef.value
   
   if (allRefsReady) {
@@ -1887,14 +1911,9 @@ const init = async () => {
   }, apiIndex.value)
 
   document.addEventListener('visibilitychange', handleVisibility)
-  await refreshServiceStatus()
-  serviceStatusRefreshInterval = setInterval(refreshServiceStatus, 5 * 60 * 1000)
-  serviceStatusClockInterval = setInterval(() => {
-    serviceStatusNow.value = Date.now()
-  }, 30 * 1000)
 }
 
-watch([cpuChartRef, gpuChartRef, ramChartRef, diskChartRef, diskIoChartRef, netChartRef, procChartRef, connChartRef, pingChartRef, lossChartRef, loadChartRef], () => {
+watch([cpuChartRef, gpuChartRef, gpuMemChartRef, gpuClockChartRef, gpuPowerChartRef, ramChartRef, diskChartRef, diskIoChartRef, netChartRef, procChartRef, connChartRef, pingChartRef, lossChartRef, loadChartRef], () => {
   if (!chartsReady.value) {
     initChartsOnMount()
   }
@@ -1907,8 +1926,6 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleVisibility)
   if (liveSocket) liveSocket.close()
-  if (serviceStatusRefreshInterval) clearInterval(serviceStatusRefreshInterval)
-  if (serviceStatusClockInterval) clearInterval(serviceStatusClockInterval)
   clearLatestReportReplayTimers()
   lastGpuSignature = ''
   safeDestroyCharts()

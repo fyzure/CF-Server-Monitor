@@ -1,17 +1,11 @@
 import { initDatabase, weeklyCleanup, getMetricsHistory, clearHistory } from './database/schema.js';
-import { checkOfflineNodes, checkExpiringServers, checkResourceAlerts, checkTrafficReports } from './services/notification.js';
+import { checkOfflineNodes, checkExpiringServers, checkResourceAlerts } from './services/notification.js';
 import { updateDatabase } from './database/updateDatabase.js';
 import { handleAdminAPI } from './handlers/admin.js';
 import { serveFrontend } from './handlers/frontend.js';
 import { handleUpdate, handleWebSocketUpgrade, handleUpdateWebSocketUpgrade } from './handlers/update.js';
 import { handleServerAPI, handleServersAPI } from './handlers/dashboard.js';
 import { handleTheme } from './handlers/theme.js';
-import {
-  cleanupServiceStatusHistory,
-  handleLegacyNsmcStatusUpdate,
-  handleServiceStatusAPI,
-  handleServiceStatusUpdate
-} from './handlers/serviceStatus.js';
 import { isValidThemeOptions, loadSettings, loadSiteSettings, loadAppearanceOptions, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, saveThemeOptions, setDebug, debug } from './utils/settings.js';
 import { omitNullLossProbeFields } from './handlers/dashboard.js';
 import { checkAuth, simpleAuthResponse } from './middleware/auth.js';
@@ -124,6 +118,10 @@ async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
     return simpleAuthResponse();
   }
   
+  if (hours > 24 && !isLoggedIn) {
+    return createUnauthorizedResponse();
+  }
+  
   const server = await getServerDetail(env.DB, id, isLoggedIn);
   if (!server) return createNotFoundResponse();
   
@@ -154,6 +152,15 @@ async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
     );
   } catch (e) {
     const message = e && e.message ? e.message : String(e);
+    if (/invalid history partition id/i.test(message)) {
+      debug('[History] 服务器未分配历史分区，无法按主键范围查询:', message);
+      return new Response(JSON.stringify({
+        message: 'historyPartitionNotAssigned'
+      }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
     if (/no such column/i.test(message)) {
       debug('[History] 数据库字段缺失，可能尚未升级数据库:', message);
       return new Response(JSON.stringify({
@@ -198,7 +205,8 @@ export default {
       const search = target.search;
       target.pathname = '/admin';
       target.search = '';
-      target.hash = `admin${search}`;
+      // 与前端入口地址统一为 #/admin 形式；旧式 #admin 由前端归一化兼容
+      target.hash = `/admin${search}`;
       return Response.redirect(target.toString(), 302);
     }
 
@@ -271,8 +279,6 @@ export default {
 
     const routes = [
       { method: 'POST', path: '/update', handler: () => handleUpdate(request, env, ctx) },
-      { method: 'POST', path: '/update/service-status', handler: () => handleServiceStatusUpdate(request, env) },
-      { method: 'POST', path: '/update/nsmc-status', handler: () => handleLegacyNsmcStatusUpdate(request, env) },
       { method: 'GET', path: '/update', handler: () => handleUpdateWebSocketUpgrade(request, env) },
       { method: 'GET', path: '/__do/health', handler: async () => {
         if (!env.METRICS_BROADCASTER) {
@@ -392,10 +398,6 @@ export default {
         await ensureFullSettings();
         return handleServersAPI(request, env, sys);
       }},
-      { method: 'GET', path: '/api/service-status', handler: async () => {
-        await ensureSiteSettings();
-        return handleServiceStatusAPI(request, env, sys);
-      }},
       { method: 'GET', path: '/api/ws', handler: async () => handleWebSocketUpgrade(request, env) },
 
       { method: 'GET', path: '/api/history/all', handler: async () => {
@@ -473,8 +475,6 @@ export default {
     const minute = now.getUTCMinutes();
     
     if (cron === '*/1 * * * *') {
-      // Traffic reports must still run during the Sunday table-rotation window.
-      await checkTrafficReports(env.DB, { scheduled: true, staggered: true, now: now.getTime() });
       if (day === 0 && hour === 0 && minute < 5) {
         debug('[Cron] 每周日0:00-0:05表轮换期间，跳过离线节点检测');
       } else {
@@ -489,7 +489,6 @@ export default {
       if (day === 0 && hour === 0) {
         debug('[Cron] 开始执行每周数据清理任务（表轮换）');
         await weeklyCleanup(env.DB);
-        await cleanupServiceStatusHistory(env.DB);
         debug('[Cron] 每周数据清理任务完成');
       }
       debug('[Cron] 检查是否到达服务器到期检测时间');
@@ -498,7 +497,6 @@ export default {
       if (cron === '0 0 * * 0') {
         debug('[Cron DEBUG] 开始执行每周数据清理任务（表轮换）');
         await weeklyCleanup(env.DB);
-        await cleanupServiceStatusHistory(env.DB);
         debug('[Cron DEBUG] 每周数据清理任务完成');
       } else if (cron === '0 12 * * *') {
         debug('[Cron DEBUG] 开始执行服务器到期检测');

@@ -171,7 +171,6 @@ export function useServerCardData(props) {
   const totalTxMonthly = computed(() => formatBytes(props.server.net_tx_monthly))
   const priceText = computed(() => formatBillingPrice(props.server, currentLang.value))
 
-
   const formatDateOnly = (value) => {
     const raw = String(value || '').trim()
     if (!raw) return ''

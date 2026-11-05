@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   estimateDurableObjectsBillableRequests,
+  sanitizeAdminSettings,
   summarizeDurableObjectsUsage
 } from '../src/handlers/admin.js';
 import {
@@ -59,19 +60,15 @@ assert.equal(estimateDurableObjectsBillableRequests('101'), 6);
 
 assert.equal(estimateDurableObjectsBillableRequests({
   httpRequests: 12,
-  alarmRequests: 3,
-  otherRequests: 2,
   hibernationWakeups: 20,
   inboundWebSocketMessages: 21,
   outboundWebSocketMessages: 1000
-}), 20);
+}), 34);
 
 const usage = summarizeDurableObjectsUsage([
   { dimensions: { type: 'fetch' }, sum: { requests: 10 } },
   { dimensions: { type: 'websocket_message' }, sum: { requests: 21 } },
-  { dimensions: { type: 'webSocketHibernation' }, sum: { requests: 20 } },
-  { dimensions: { type: 'alarm' }, sum: { requests: 3 } },
-  { dimensions: { type: 'rpc' }, sum: { requests: 4 } }
+  { dimensions: { type: 'webSocketHibernation' }, sum: { requests: 20 } }
 ], [
   { sum: { inboundWebsocketMsgCount: 39, outboundWebsocketMsgCount: 100 } },
   { sum: { inboundWebsocketMsgCount: '1', outboundWebsocketMsgCount: '20' } }
@@ -79,34 +76,28 @@ const usage = summarizeDurableObjectsUsage([
 
 assert.deepEqual(usage, {
   httpRequests: 10,
-  alarmRequests: 3,
-  otherRequests: 4,
-  hibernationWebSocketMessages: 41,
   hibernationWakeups: 41,
   inboundWebSocketMessages: 40,
   outboundWebSocketMessages: 120,
-  rawRequests: 58,
-  billableRequests: 22
+  rawRequests: 51,
+  billableRequests: 53
 });
-
-const productionShapeUsage = summarizeDurableObjectsUsage([
-  { dimensions: { type: 'hibernation' }, sum: { requests: 100829 } },
-  { dimensions: { type: 'http' }, sum: { requests: 714 } },
-  { dimensions: { type: 'alarm' }, sum: { requests: 17 } }
-], [
-  { sum: { inboundWebsocketMsgCount: 0, outboundWebsocketMsgCount: 197579 } }
-]);
-
-assert.equal(productionShapeUsage.billableRequests, 5773);
-assert.equal(productionShapeUsage.hibernationWebSocketMessages, 100829);
-assert.equal(productionShapeUsage.httpRequests, 714);
-assert.equal(productionShapeUsage.alarmRequests, 17);
 
 assert.equal(isValidThemeOptions({}), true);
 assert.equal(isValidThemeOptions({ layout: 'compact' }), true);
 assert.equal(isValidThemeOptions([]), false);
 assert.equal(isValidThemeOptions(null), false);
 assert.equal(isValidThemeOptions('{"layout":"compact"}'), false);
+
+const safeAdminSettings = sanitizeAdminSettings({
+  username: 'admin',
+  password: 'pbkdf2_sha256$50000$salt$hash',
+  jwt_secret: 'jwt-secret'
+});
+assert.equal(Object.hasOwn(safeAdminSettings, 'password'), false);
+assert.equal(Object.hasOwn(safeAdminSettings, 'jwt_secret'), false);
+assert.equal(safeAdminSettings.password_configured, true);
+assert.equal(sanitizeAdminSettings({ password: '' }).password_configured, false);
 
 const themeOptionsDb = makeSettingsDb({
   appearance_options: JSON.stringify({
