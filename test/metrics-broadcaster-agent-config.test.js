@@ -16,6 +16,9 @@ globalThis.WebSocketRequestResponsePair = class WebSocketRequestResponsePair {
 function makeBroadcaster(webSockets = [], env = { DB: {} }) {
   return new MetricsBroadcaster({
     setWebSocketAutoResponse() {},
+    acceptWebSocket(ws) {
+      webSockets.push(ws);
+    },
     getWebSockets() {
       return webSockets;
     },
@@ -261,7 +264,7 @@ test('Durable Object rechecks Agent WSS schedule before accepting a socket', asy
   const body = await response.json();
   assert.equal(body.text, 'wss_schedule_inactive');
   assert.equal(body.connection_mode, 'http');
-  assert.equal(broadcaster.standardAgentWebSocketCount, 0);
+  assert.equal(broadcaster._getAgentReportWebSockets().length, 0);
 });
 
 test('Durable Object rejects Agent WSS upgrade when report is disabled', async () => {
@@ -284,7 +287,7 @@ test('Durable Object rejects Agent WSS upgrade when report is disabled', async (
   assert.equal(body.code, 409);
   assert.equal(body.text, 'wss_disabled');
   assert.equal(body.connection_mode, 'http');
-  assert.equal(broadcaster.standardAgentWebSocketCount, 0);
+  assert.equal(broadcaster._getAgentReportWebSockets().length, 0);
 });
 
 test('WSS agent config state only requests ack for fields in current report', () => {
@@ -299,22 +302,22 @@ test('WSS agent config state only requests ack for fields in current report', ()
   );
 });
 
-test('WSS agent standard WebSocket adapter preserves attachment state', async () => {
-  const broadcaster = makeBroadcaster();
-  const listeners = {};
+test('WSS agent Hibernation API preserves attachment state', async () => {
+  const registered = [];
+  const broadcaster = makeBroadcaster(registered);
   const sent = [];
-  let accepted = false;
+  let attachment = {};
   const server = {
-    accept() {
-      accepted = true;
+    serializeAttachment(value) {
+      attachment = value;
+    },
+    deserializeAttachment() {
+      return attachment;
     },
     send(message) {
       sent.push(message);
     },
-    close() {},
-    addEventListener(type, handler) {
-      listeners[type] = handler;
-    }
+    close() {}
   };
 
   let finish;
@@ -329,18 +332,18 @@ test('WSS agent standard WebSocket adapter preserves attachment state', async ()
     finish();
   };
 
-  const ws = broadcaster._acceptStandardAgentWebSocket(server, { kind: 'agent-report' });
-  assert.equal(accepted, true);
-  assert.equal(broadcaster.standardAgentWebSocketCount, 1);
+  const ws = broadcaster._acceptHibernatingAgentWebSocket(server, { kind: 'agent-report' });
+  assert.equal(ws, server);
+  assert.deepEqual(registered, [server]);
+  assert.equal(broadcaster._getAgentReportWebSockets().length, 1);
 
-  listeners.message({ data: '{"metrics":{}}' });
+  await broadcaster.webSocketMessage(ws, '{"metrics":{}}');
   await handled;
 
   assert.equal(ws.deserializeAttachment().serverId, 'server-1');
   assert.deepEqual(sent, ['ok']);
 
-  listeners.close();
-  assert.equal(broadcaster.standardAgentWebSocketCount, 0);
+  assert.equal(broadcaster._getAgentReportWebSockets().length, 1);
 });
 
 test('WSS agent ack suggests configured realtime or idle report interval', () => {

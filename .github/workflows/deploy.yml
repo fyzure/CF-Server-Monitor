@@ -1,119 +1,133 @@
-name: Deploy to Cloudflare Workers
+name: CI/CD - Cloudflare Worker
 
 on:
   push:
-    branches:
-      - main
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - 'LICENSE'
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: cf-server-monitor-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  check:
+  ci:
+    name: Test and build
     runs-on: ubuntu-latest
-    outputs:
-      should_deploy: ${{ steps.decide.outputs.should_deploy }}
-    steps:
-      - id: decide
-        run: |
-          if [ -n "$CF_ACCOUNT_ID" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "should_deploy=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_deploy=false" >> $GITHUB_OUTPUT
-          fi
-        env:
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          EVENT_NAME: ${{ github.event_name }}
+    timeout-minutes: 15
 
-  deploy:
-    needs: check
-    if: needs.check.outputs.should_deploy == 'true'
-    runs-on: ubuntu-latest
-    name: Deploy
     steps:
-      - name: 📥 Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v7
 
-      - name: 🔧 Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: "24"
+          cache: npm
 
-      - name: 📦 Install dependencies
-        run: npm install
+      - name: Install dependencies
+        run: npm ci --include=dev
 
-      - name: 🏗️ Build frontend assets
+      - name: Install Miniflare test runtime
+        run: npm install --include=dev --no-save --package-lock=false miniflare@3.20250718.3
+
+      - name: Test runtime suite
+        run: npm run test
+
+      - name: Guard Durable Object WebSocket hibernation
+        run: |
+          if grep -nE 'server\.accept\(' src/durable/MetricsBroadcaster.js; then
+            echo "::error::Durable Object must use state.acceptWebSocket() so Agent connections can hibernate."
+            exit 1
+          fi
+
+      - name: Test agent configuration
+        run: npm run test:agent-config
+
+      - name: Test history queries
+        run: npm run test:history-query
+
+      - name: Build frontend
         run: npm run build:frontend
 
-      - name: 📝 Create wrangler.toml
-        run: |
-          cat > wrangler.toml << 'WEOF'
-          name = "server-monitor-pro"
-          main = "src/index.js"
-          compatibility_date = "2024-12-01"
-          compatibility_flags = ["nodejs_compat"]
+      - name: Validate Worker bundle
+        run: npx wrangler deploy --dry-run
 
-          # 定时任务配置（UTC）
-          # - 每分钟：执行离线节点检测
-          # - 每小时：合并执行其他定时任务（每月1号数据清理、每月8号清理旧表、每天12点服务器到期检测）
-          [triggers]
-          crons = ["*/1 * * * *", "0 * * * *"]
+  deploy:
+    name: Deploy production
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://monitor.fyzure.fyi/
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
 
-          [assets]
-          directory = "./dist"
-          binding = "ASSETS"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
 
-          [[d1_databases]]
-          binding = "DB"
-          database_name = "server-monitor-db"
-          database_id = "D1_PLACEHOLDER"
-
-          # Durable Objects：实时指标广播中心
-          [[durable_objects.bindings]]
-          name = "METRICS_BROADCASTER"
-          class_name = "MetricsBroadcaster"
-
-          [[migrations]]
-          tag = "v1"
-          new_sqlite_classes = ["MetricsBroadcaster"]
-
-          [vars]
-          API_SECRET = "SECRET_PLACEHOLDER"
-          API_USER_NAME = "USER_NAME_PLACEHOLDER"
-          CORS_ALLOWED_ORIGINS = "CORS_ORIGINS_PLACEHOLDER"
-          WEOF
-
-          # 替换占位符
-          sed -i "s|D1_PLACEHOLDER|${{ secrets.D1_DATABASE_ID }}|g" wrangler.toml
-          sed -i "s|SECRET_PLACEHOLDER|${{ secrets.API_SECRET }}|g" wrangler.toml
-          sed -i "s|USER_NAME_PLACEHOLDER|${{ secrets.API_USER_NAME }}|g" wrangler.toml
-          sed -i "s|CORS_ORIGINS_PLACEHOLDER|${{ secrets.CORS_ALLOWED_ORIGINS }}|g" wrangler.toml
-
-          echo "✅ wrangler.toml 已生成"
-
-      # wrangler v4 的 `deploy` 会自动根据 wrangler.toml 中的 [[durable_objects.bindings]]
-      # 声明创建 DO namespace（幂等：已存在则跳过），无需单独命令。
-      # 前提：MetricsBroadcaster 类必须从 index.js 导出（已通过 src/index.js 实现）。
-      - name: 🚀 Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
         with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: deploy
+          node-version: "24"
+          cache: npm
 
-      - name: ✅ Deployment Success
-        if: success()
-        run: |
-          echo "============================================"
-          echo "  🎉 部署成功！"
-          echo "============================================"
+      - name: Install dependencies
+        run: npm ci --include=dev
 
-      - name: ❌ Deployment Failed
-        if: failure()
+      - name: Build frontend
+        run: npm run build:frontend
+
+      - name: Deploy Worker
+        run: npx wrangler deploy
+
+      - name: Verify production
+        shell: bash
         run: |
-          echo "============================================"
-          echo "  💥 部署失败！请检查 Actions 日志"
-          echo "============================================"
+          set -euo pipefail
+          expected_version=$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync('version.json', 'utf8')).workers)")
+
+          config_ok=false
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error \
+              --max-time 15 \
+              "https://monitor.fyzure.fyi/api/config?health=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
+              -o /tmp/cfsm-config.json \
+              && jq -e --arg expected_version "$expected_version" '
+                type == "object" and
+                (.version == $expected_version) and
+                (.is_public | type == "boolean")
+              ' /tmp/cfsm-config.json >/dev/null; then
+              config_ok=true
+              break
+            fi
+            echo "Production config has not converged to ${expected_version} yet (attempt ${attempt}/12)."
+            sleep 5
+          done
+
+          if [ "$config_ok" != true ]; then
+            echo "::error::Production /api/config did not converge to expected version ${expected_version}."
+            cat /tmp/cfsm-config.json || true
+            exit 1
+          fi
+
+          curl --fail --silent --show-error \
+            --retry 6 --retry-delay 5 --retry-all-errors \
+            https://monitor.fyzure.fyi/api/servers \
+            -o /tmp/cfsm-servers.json
+          jq -e '
+            type == "object" and
+            (.servers | type == "array") and
+            (.stats | type == "object") and
+            (.stats.total | type == "number") and
+            (.stats.online | type == "number")
+          ' /tmp/cfsm-servers.json >/dev/null

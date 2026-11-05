@@ -1,0 +1,276 @@
+name: Publish CFSM Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent_ref:
+        description: Source ref in UnlastingR/cfsm-agent
+        required: true
+        default: main
+        type: string
+      force:
+        description: Rebuild even when agent-latest already points at this source commit
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cfsm-agent-release
+  cancel-in-progress: false
+
+env:
+  AGENT_REPOSITORY: UnlastingR/cfsm-agent
+  DEFAULT_AGENT_REF: main
+
+jobs:
+  publish:
+    name: Build and publish agent binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout agent source
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.AGENT_REPOSITORY }}
+          ref: ${{ inputs.agent_ref || env.DEFAULT_AGENT_REF }}
+          path: agent-src
+          fetch-depth: 0
+
+      - name: Resolve source metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd agent-src
+
+          source_sha="$(git rev-parse HEAD)"
+          source_short="$(git rev-parse --short=7 HEAD)"
+          version="$(git describe --tags --match 'v[0-9]*' --abbrev=0)"
+
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Unsupported agent version tag: $version" >&2
+            exit 1
+          fi
+
+          immutable_tag="agent-${version}-${source_short}"
+          source_ref="${{ inputs.agent_ref || env.DEFAULT_AGENT_REF }}"
+
+          {
+            echo "source_sha=$source_sha"
+            echo "source_short=$source_short"
+            echo "source_ref=$source_ref"
+            echo "version=$version"
+            echo "immutable_tag=$immutable_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the rolling release is current
+        id: current
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
+          FORCE: ${{ inputs.force || 'false' }}
+        run: |
+          set -euo pipefail
+
+          if [ "$FORCE" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+
+          if gh release download agent-latest \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern agent-manifest.json \
+            --dir "$tmpdir" >/dev/null 2>&1; then
+            current_sha="$(jq -r '.source_sha // empty' "$tmpdir/agent-manifest.json")"
+            if [ "$current_sha" = "$SOURCE_SHA" ]; then
+              echo "agent-latest already contains source $SOURCE_SHA"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        if: steps.current.outputs.publish == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: agent-src/go.mod
+          cache-dependency-path: agent-src/go.sum
+
+      - name: Build release binaries
+        if: steps.current.outputs.publish == 'true'
+        shell: bash
+        working-directory: agent-src
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          ldflags="-s -w -X main.version=${VERSION}"
+
+          build_one() {
+            goos="$1"
+            goarch="$2"
+            suffix="$3"
+            goarm="${4:-}"
+            output="dist/cf-probe-${goos}-${suffix}"
+            if [ "$goos" = "windows" ]; then
+              output="${output}.exe"
+            fi
+
+            echo "Building ${goos}/${goarch}${goarm:+ GOARM=${goarm}} -> ${output}"
+            GOOS="$goos" GOARCH="$goarch" GOARM="$goarm" CGO_ENABLED=0 \
+              go build -trimpath -ldflags="$ldflags" -o "$output" ./cmd/cf-probe
+          }
+
+          build_one linux amd64 amd64
+          build_one linux arm64 arm64
+          build_one linux 386 386
+          build_one linux arm armv5 5
+          build_one linux arm armv6 6
+          build_one linux arm armv7 7
+          build_one linux loong64 loong64
+          build_one freebsd amd64 amd64
+          build_one freebsd arm64 arm64
+          build_one freebsd 386 386
+          build_one freebsd arm arm
+          build_one darwin amd64 amd64
+          build_one darwin arm64 arm64
+          build_one windows amd64 amd64
+          build_one windows arm64 arm64
+          build_one windows 386 386
+
+          sha256sum dist/cf-probe-* > dist/checksums.txt
+
+      - name: Write release manifest
+        if: steps.current.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
+          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
+          IMMUTABLE_TAG: ${{ steps.meta.outputs.immutable_tag }}
+        run: |
+          set -euo pipefail
+          built_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg source_repository "$AGENT_REPOSITORY" \
+            --arg source_ref "$SOURCE_REF" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg immutable_release_tag "$IMMUTABLE_TAG" \
+            --arg rolling_release_tag "agent-latest" \
+            --arg built_at "$built_at" \
+            '{
+              version: $version,
+              source_repository: $source_repository,
+              source_ref: $source_ref,
+              source_sha: $source_sha,
+              immutable_release_tag: $immutable_release_tag,
+              rolling_release_tag: $rolling_release_tag,
+              built_at: $built_at
+            }' > agent-src/dist/agent-manifest.json
+
+      - name: Publish immutable release
+        if: steps.current.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
+          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
+          RELEASE_TAG: ${{ steps.meta.outputs.immutable_tag }}
+        run: |
+          set -euo pipefail
+
+          notes=$(cat <<EOF
+          CFSM Agent ${VERSION}
+
+          Source: ${AGENT_REPOSITORY}@${SOURCE_REF}
+          Commit: ${SOURCE_SHA}
+
+          This release is built by fyzure/CF-Server-Monitor and is kept as an immutable provenance snapshot.
+          Use the agent-latest release for stable installation URLs.
+          EOF
+          )
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" agent-src/dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" agent-src/dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "CFSM Agent ${VERSION} (${SOURCE_SHA:0:7})" \
+              --notes "$notes" \
+              --latest=false
+          fi
+
+      - name: Publish rolling agent-latest release
+        if: steps.current.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
+          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
+          IMMUTABLE_TAG: ${{ steps.meta.outputs.immutable_tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view agent-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete agent-latest \
+              --repo "$GITHUB_REPOSITORY" \
+              --cleanup-tag \
+              --yes
+          fi
+
+          notes=$(cat <<EOF
+          Current CFSM Agent build: ${VERSION}
+
+          Source: ${AGENT_REPOSITORY}@${SOURCE_REF}
+          Commit: ${SOURCE_SHA}
+          Immutable release: ${IMMUTABLE_TAG}
+
+          The assets in this rolling release keep stable installation URLs.
+          EOF
+          )
+
+          gh release create agent-latest agent-src/dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "CFSM Agent latest - ${VERSION}" \
+            --notes "$notes" \
+            --latest
+
+      - name: Summary
+        shell: bash
+        env:
+          PUBLISH: ${{ steps.current.outputs.publish }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
+          IMMUTABLE_TAG: ${{ steps.meta.outputs.immutable_tag }}
+        run: |
+          if [ "$PUBLISH" = "true" ]; then
+            {
+              echo "### CFSM Agent published"
+              echo
+              echo "- Version: \`$VERSION\`"
+              echo "- Source commit: \`$SOURCE_SHA\`"
+              echo "- Immutable release: \`$IMMUTABLE_TAG\`"
+              echo "- Rolling release: \`agent-latest\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "CFSM Agent source is unchanged; release skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
